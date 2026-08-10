@@ -14,7 +14,7 @@
   "apiBase": {
     "type": "string",
     "description": "酷狗 API 地址（KuGouMusicApi 服务，如 http://127.0.0.1:3000）",
-    "default": "http://127.0.0.1:3000",
+    "default": "",
     "hint": "KuGouMusicApi 默认端口 3000；如需自定义用 PORT=端口 启动。与插件同机部署时用 127.0.0.1。"
   },
   "enable": {
