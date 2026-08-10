@@ -60,10 +60,6 @@ def set_device_cookie(cookie: str):
     _device_cookie = cookie or ""
 
 
-def get_device_cookie() -> str:
-    return _device_cookie
-
-
 def _compose_cookie_str(*, anon: bool = False) -> str:
     """组合请求 Cookie：设备 dfid + 登录 Cookie（无登录时可补非空匿名占位）。
 
@@ -132,7 +128,6 @@ async def request(
     pathname: str,
     params: dict | None = None,
     method: str = "get",
-    user_key: str = "",
     *,
     inject_cookie: bool = True,
     anon: bool = False,
@@ -141,7 +136,6 @@ async def request(
 
     anon=True 时未登录会补匿名占位 token/userid（仅 /search 类需要）。
     """
-    del user_key  # 酷狗为共享账号（配置 defaultCookie），暂无 per-user 分离
     params = dict(params or {})
     base = _get_base()
     if not base:
@@ -822,10 +816,11 @@ async def video_url(hash_: str) -> str:
     data = (body or {}).get("data") or {}
     if not isinstance(data, dict):
         return ""
-    key = hash_.lower()
-    item = data.get(key) or {}
-    if isinstance(item, dict):
-        return str(item.get("downurl") or "")
+    # 上游返回的 key 大小写不固定，统一按请求 hash 原样/小写/大写尝试
+    for key in (hash_, str(hash_).lower(), str(hash_).upper()):
+        item = data.get(key)
+        if isinstance(item, dict) and item.get("downurl"):
+            return str(item["downurl"])
     return ""
 
 
@@ -1092,7 +1087,13 @@ async def everyday_history() -> list:
 async def song_climax(hash_: str) -> dict:
     """歌曲高潮片段时间。"""
     body = await request("/song/climax", {"hash": hash_})
-    d0 = ((body or {}).get("data") or [{}])[0] if (body or {}).get("data") else {}
+    data = (body or {}).get("data")
+    # 上游 data 可能是数组（单元素）也可能是按 hash 键控的对象，两者都兼容
+    d0 = None
+    if isinstance(data, list):
+        d0 = data[0] if data else None
+    elif isinstance(data, dict):
+        d0 = data.get(hash_) or data.get(str(hash_).lower()) or data
     if not isinstance(d0, dict):
         return {}
     return {
@@ -1115,7 +1116,9 @@ async def ai_recommend(mixsongid: str, pagesize: int = 20) -> list:
 
 async def favorite_count(mixsongid: str) -> str:
     body = await request("/favorite/count", {"mixsongids": mixsongid})
-    lst = ((body or {}).get("data") or {}).get("list") or []
+    data = (body or {}).get("data")
+    # 上游 data 可能是 {list: [...]} 也可能是裸数组，兼容两种
+    lst = data.get("list") if isinstance(data, dict) else (data if isinstance(data, list) else [])
     if lst and isinstance(lst[0], dict):
         return str(lst[0].get("count_text") or "")
     return ""
@@ -1354,7 +1357,3 @@ def extract_kugou_hash(text: str) -> str:
     if m:
         return m.group(1)
     return ""
-
-
-def is_kugou_link(text: str) -> bool:
-    return bool(re.search(r"kugou\.com|kugou\.net", text or "", re.IGNORECASE))

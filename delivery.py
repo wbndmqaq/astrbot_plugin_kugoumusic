@@ -9,7 +9,7 @@ from pathlib import Path
 import aiohttp
 from astrbot.api.message_components import File, Record
 
-from .quality import QUALITY_LABEL
+from .quality import trial_label
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -150,9 +150,7 @@ async def deliver_song(
     title = song.get("name") or "未知歌曲"
     singer = song.get("artist") or "未知歌手"
 
-    quality_label = play.get("qualityLabel") or QUALITY_LABEL.get(play.get("quality") or "", "") or ""
-    if play.get("trial"):
-        quality_label = f"{quality_label}（试听 60s）" if quality_label else "试听 60s"
+    quality_label = trial_label(play)
 
     skip_text = options.get("skipTextInfo", False)
     skip_native = options.get("skipNativeCard", False)
@@ -213,9 +211,7 @@ async def deliver_song(
         want_vocal = False
         want_file = want_file or bool(cfg.get("sendVocal"))
     ext = os.path.splitext(local_path)[1] or ".mp3"
-    file_display = build_music_filename(
-        singer=singer, title=title, quality=play.get("quality") or cfg.get("quality") or "", ext=ext
-    )
+    file_display = build_music_filename(singer=singer, title=title, ext=ext)
     file_size = int(dl.get("size", 0))
     file_blocked = is_qqoff and want_file and (file_size > 10 * 1024 * 1024 or ext.lower() == ".flac")
     if file_blocked:

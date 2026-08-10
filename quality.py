@@ -25,6 +25,14 @@ QUALITY_LABEL = {"auto": "自动适配"}
 QUALITY_LABEL.update({item["value"]: item["label"] for item in KUGOU_QUALITY_LIST if item["value"] != "auto"})
 
 
+def trial_label(play: dict) -> str:
+    """取链结果 → 展示用音质标签（试听流追加「试听 60s」）。"""
+    ql = play.get("qualityLabel") or QUALITY_LABEL.get(play.get("quality") or "", "") or ""
+    if play.get("trial"):
+        return f"{ql}（试听 60s）" if ql else "试听 60s"
+    return ql
+
+
 def quality_candidates(preferred: str = "auto") -> list[str]:
     """从偏好音质起向下返回候选阶梯（auto → 全部从高到低）。"""
     q = (preferred or "auto").lower()
@@ -69,7 +77,3 @@ def hash_for_quality(song: dict, quality: str) -> str:
     if q == "320":
         return _first(song.get("hash_320"), (song.get("HQ") or {}).get("Hash"))
     return _first(song.get("hash_128"), song.get("hash"), song.get("FileHash"))
-
-
-def has_flac(song: dict) -> bool:
-    return bool(hash_for_quality(song, "flac"))

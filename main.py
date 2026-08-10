@@ -17,11 +17,9 @@ from . import api as kgapi
 from . import cards as cardlib
 from .api import ApiError
 from .delivery import deliver_song
-from .quality import QUALITY_LABEL
+from .quality import QUALITY_LABEL, trial_label
 
 PLUGIN_DIR = str(Path(__file__).resolve().parent)
-
-NEW_SONG_RANKS = {"默认": 21608}
 
 
 def _is_plugin_command_msg(msg: str) -> bool:
@@ -230,6 +228,14 @@ class KugouMusicPlugin(Star):
     def _has_cookie(self) -> bool:
         return bool(self._cfg().get("defaultCookie"))
 
+    async def _require_login(self, event: AstrMessageEvent) -> bool:
+        """未登录时提示并消费事件，返回 False（调用方需立即 return）。"""
+        if not self._has_cookie():
+            await self._reply(event, "需要登录后使用，请先 #kg登录")
+            event.stop_event()
+            return False
+        return True
+
     # ──────────── 取链 ────────────
 
     async def _resolve_play(self, song: dict, cfg: dict) -> dict:
@@ -250,9 +256,7 @@ class KugouMusicPlugin(Star):
     async def _play_song(self, event: AstrMessageEvent, song: dict, *, source: str = "") -> None:
         cfg = self._cfg()
         play = await self._resolve_play(song, cfg)
-        quality_label = play.get("qualityLabel") or ""
-        if play.get("trial"):
-            quality_label = f"{quality_label}（试听 60s）" if quality_label else "试听 60s"
+        quality_label = trial_label(play)
         if play.get("url"):
             tip = "正在下载并发送语音/文件…"
         elif play.get("error"):
@@ -292,12 +296,12 @@ class KugouMusicPlugin(Star):
     async def _list_to_session(self, event: AstrMessageEvent, keyword: str, songs: list, *, tip: str = "") -> bool:
         scope = self._scope(event)
         await cardlib.SessionStore.set(self, scope, {"type": "kg_songs", "keyword": keyword, "data": songs})
-        text = lambda: cardlib.format_song_list(songs, keyword, tip=tip)
+        text = cardlib.format_song_list(songs, keyword, tip=tip)
         if self._cfg().get("renderListCard", True):
             data = cardlib.build_list_card_data(keyword, songs, options={"tip": tip}, cfg=self._cfg())
-            if await self._reply_card_or_text(event, tpl_name="kg-list", data=data, format_text=lambda d: text()):
+            if await self._reply_card_or_text(event, tpl_name="kg-list", data=data, format_text=lambda d: text):
                 return True
-        await self._reply(event, text())
+        await self._reply(event, text)
         return True
 
     # ──────────── 卡片渲染 ────────────
@@ -504,7 +508,7 @@ class KugouMusicPlugin(Star):
                 out.append(t)
             if len(out) >= max_lines:
                 break
-        return out[:40]
+        return out
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*歌词\s*(.+)$", re.IGNORECASE))
     async def get_lyric(self, event: AstrMessageEvent):
@@ -557,7 +561,7 @@ class KugouMusicPlugin(Star):
                 out.append(t)
             if len(out) >= 36:
                 break
-        return out[:40]
+        return out
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*逐字歌词\s+(.+)$", re.IGNORECASE))
     async def lyric_word(self, event: AstrMessageEvent):
@@ -811,16 +815,13 @@ class KugouMusicPlugin(Star):
             await self._reply(event, f"获取评论失败：{err}")
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*新歌\s*(.*)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*新歌\s*$", re.IGNORECASE))
     async def new_song(self, event: AstrMessageEvent):
         """#kg新歌：新歌速递"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*新歌\s*(.*)$")
-        if not m:
+        if not self._cfg().get("enable", True):
             return
-        area = m.group(1).strip()
-        rank_id = NEW_SONG_RANKS.get(area, 21608)
         try:
-            songs = await kgapi.top_song(rank_id=rank_id, pagesize=30)
+            songs = await kgapi.top_song(rank_id=21608, pagesize=30)
             if not songs:
                 await self._reply(event, "暂无新歌数据")
                 event.stop_event()
@@ -1501,9 +1502,7 @@ class KugouMusicPlugin(Star):
         """#kg云盘：我的云盘歌曲（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             songs = await kgapi.user_cloud(pagesize=30)
@@ -1523,9 +1522,7 @@ class KugouMusicPlugin(Star):
         """#kg已购：已购单曲/专辑（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             songs = await kgapi.user_purchased_songs(pagesize=20)
@@ -1552,9 +1549,7 @@ class KugouMusicPlugin(Star):
         """#kg等级：听歌等级（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             g = await kgapi.user_grade_info()
@@ -1582,6 +1577,8 @@ class KugouMusicPlugin(Star):
         """#kg关注 歌手 / #kg取关 歌手：关注/取关歌手（需登录）"""
         if not self._cfg().get("enable", True):
             return
+        if not await self._require_login(event):
+            return
         m = re.match(r"^#?(?:kg|KG)\s*(关注|取关|取消关注)\s+(.+)$", event.message_str.strip(), re.IGNORECASE)
         action = m.group(1) if m else ""
         kw = (m.group(2).strip() if m else "").strip()
@@ -1608,9 +1605,7 @@ class KugouMusicPlugin(Star):
         """#kg关注新歌：关注的歌手新歌（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             songs = await kgapi.artist_follow_newsongs(pagesize=30)
@@ -1630,9 +1625,7 @@ class KugouMusicPlugin(Star):
         """#kg关注列表：我关注的歌手（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             artists = await kgapi.user_follow(pagesize=30)
@@ -1756,9 +1749,7 @@ class KugouMusicPlugin(Star):
         """#kg最近：最近播放歌曲（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             songs = await kgapi.user_listen(pagesize=30)
@@ -1778,9 +1769,7 @@ class KugouMusicPlugin(Star):
         """#kg听歌排行：听歌排行（需登录）"""
         if not self._cfg().get("enable", True):
             return
-        if not self._has_cookie():
-            await self._reply(event, "需要登录后使用，请先 #kg登录")
-            event.stop_event()
+        if not await self._require_login(event):
             return
         try:
             songs = await kgapi.user_history(pagesize=30)
@@ -2118,6 +2107,11 @@ class KugouMusicPlugin(Star):
                     await self._reply(event, "该歌曲不存在或无版权")
                     return True
                 await self._play_song(event, song, source="链接解析")
+                return True
+            if h:
+                # 提取到的是 mixsongid（数字）：KuGouMusicApi 的 /audio 只支持
+                # 32 位文件 hash，无法据此取链，明确提示而非静默失败
+                await self._reply(event, "该链接为 mixsongid 形式，暂不支持自动解析，可用 #kg点歌 关键词 代替")
                 return True
             # 无 hash：把链接去掉后当关键词搜索
             kw = re.sub(r"https?://\S+|\[CQ:[^\]]*\]", "", text).strip()
