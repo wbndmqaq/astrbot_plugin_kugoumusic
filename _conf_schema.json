@@ -1,0 +1,126 @@
+{
+  "defaultCookie": {
+    "type": "string",
+    "default": "",
+    "description": "酷狗登录 Cookie（token=...;userid=... 等）。可手动粘贴，或由 #kg登录 扫码自动写入，后写覆盖先写。留空则匿名（VIP 歌曲仅 60s 试听）。",
+    "hint": "从浏览器已登录的酷狗页面复制：F12 → Network → 任一 kugou.com 请求 → 请求头 Cookie 整段粘贴。注意：此处明文存储，请留意 WebUI 面板访问权限。"
+  },
+  "defaultUid": {
+    "type": "string",
+    "default": "",
+    "invisible": true,
+    "description": "扫码登录后自动写入的账号 userid；手填 cookie 时留空即可，首次用到会自动从 cookie 反查"
+  },
+  "apiBase": {
+    "type": "string",
+    "description": "酷狗 API 地址（KuGouMusicApi 服务，如 http://127.0.0.1:3000）",
+    "default": "http://127.0.0.1:3000",
+    "hint": "KuGouMusicApi 默认端口 3000；如需自定义用 PORT=端口 启动。与插件同机部署时用 127.0.0.1。"
+  },
+  "enable": {
+    "type": "bool",
+    "description": "插件总开关",
+    "default": true
+  },
+  "enableSongRequest": {
+    "type": "bool",
+    "description": "点歌功能开关",
+    "default": true
+  },
+  "enableResolve": {
+    "type": "bool",
+    "description": "酷狗链接自动解析开关",
+    "default": true
+  },
+  "maxList": {
+    "type": "int",
+    "description": "点歌列表最大显示条数（1-20）",
+    "default": 10
+  },
+  "quality": {
+    "type": "string",
+    "description": "最高播放音质",
+    "default": "auto",
+    "options": [
+      "auto",
+      "viper_tape",
+      "viper_clear",
+      "super",
+      "high",
+      "flac",
+      "320",
+      "128"
+    ],
+    "labels": [
+      "auto 自动适配最高可用",
+      "viper_tape 蝰蛇母带2.0",
+      "viper_clear 蝰蛇超清",
+      "super 蝰蛇HiFi",
+      "high Hi-Res",
+      "flac 无损 FLAC",
+      "320 高品 320K",
+      "128 标准 128K"
+    ],
+    "hint": "auto 自动匹配歌曲最高可用音质并逐级降级；其余为指定最高档位（蝰蛇/Hi-Res 档需登录 VIP 账号）。也可用指令 #kg音质 <档位> 修改。"
+  },
+  "trialFallback": {
+    "type": "bool",
+    "description": "匿名时 VIP/付费歌曲自动发送 60s 试听片段（关闭则提示登录）",
+    "default": true
+  },
+  "sendVocal": {
+    "type": "bool",
+    "description": "以语音消息方式发送音频",
+    "default": true
+  },
+  "uploadFile": {
+    "type": "bool",
+    "description": "以群/好友文件方式发送音频",
+    "default": true
+  },
+  "tempDir": {
+    "type": "string",
+    "description": "音频临时下载目录（相对插件目录）",
+    "default": "temp/kugou"
+  },
+  "downloadTimeout": {
+    "type": "int",
+    "description": "音频下载超时（毫秒）",
+    "default": 90000
+  },
+  "keepFileSec": {
+    "type": "int",
+    "description": "临时文件保留秒数（0 表示立即删除）",
+    "default": 60
+  },
+  "identifyPrefix": {
+    "type": "string",
+    "description": "识别提示前缀",
+    "default": "识别："
+  },
+  "qrLoginEnable": {
+    "type": "bool",
+    "description": "允许使用 #kg登录 扫码登录命令",
+    "default": true
+  },
+  "qqofficialAdapt": {
+    "type": "bool",
+    "description": "QQ 官方机器人专用适配：合并消息以规避被动回复额度、语音(silk)发送失败自动回退文件、跳过不支持的原生卡片",
+    "default": true
+  },
+  "renderListCard": {
+    "type": "bool",
+    "description": "将点歌/列表结果渲染为图片卡片（关闭则纯文本）",
+    "default": true
+  },
+  "sendNativeCard": {
+    "type": "bool",
+    "description": "发送 OneBot 原生音乐卡片（type=kugou，仅 aiocqhttp 等支持 send_api 的协议；QQ 官方机器人自动跳过）",
+    "default": false
+  },
+  "sendTextInfo": {
+    "type": "bool",
+    "description": "发送音频时附带歌曲信息文案",
+    "default": true
+  }
+}

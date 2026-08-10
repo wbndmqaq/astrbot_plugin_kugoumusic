@@ -1,0 +1,21 @@
+name: astrbot_plugin_kugoumusic
+display_name: "酷狗音乐点歌/解析插件"
+short_desc: 酷狗点歌、排行榜、歌词、评论、扫码登录
+desc: |
+  基于 KuGouMusicApi 的 AstrBot 酷狗音乐插件。
+  支持点歌、播放、歌词、热搜、排行榜、歌手/专辑/歌单/评论、相似推荐、
+  新歌速递、每日推荐、私人 FM、MV、扫码登录、音质自适配与 60s 试听降级、
+  语音/文件发送、酷狗音乐链接自动解析。
+  需配合 KuGouMusicApi 服务使用。
+version: 1.0.0
+author: wbndm
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - weixin_oc
+  - telegram
+  - dingtalk
+  - lark
+  - kook
+  - discord
