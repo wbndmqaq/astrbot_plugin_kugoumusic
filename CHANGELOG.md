@@ -1,5 +1,15 @@
 # 更新日志
 
+## v1.0.3 (2026-08-18)
+
+### ✨ 新功能
+
+- **新增 QQ 扫码登录支持（`#kgqq登录`）**：对齐 KuGouMusicApi 新增的 QQ 扫码授权链路（`/login/qq/qr/create` + `/login/qq/qr/check`），支持通过手机 QQ 扫码完成酷狗账号授权与绑定，自动换取并持久化 `token` / `userid` 到插件配置 `defaultCookie`。
+
+### 🐛 修复与优化
+
+- **Playwright Chromium 自动下载优化**：渲染卡片时若检测到未安装 Chromium 浏览器二进制，自动通过国内高速镜像源（`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/`）在后台子线程中静默安装并恢复渲染，避免卡片渲染报错崩溃。
+
 ## v1.0.2 (2026-08-15)
 
 ### ✨ 新功能

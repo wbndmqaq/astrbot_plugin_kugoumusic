@@ -5,6 +5,8 @@ import json
 import os
 import random
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -319,7 +321,27 @@ class KugouMusicPlugin(Star):
             tmpl = get_jinja_template(tmpl_path)
             html = jinja2.Template(tmpl).render(data=data)
             async with async_playwright() as p:
-                browser = await p.chromium.launch()
+                launch_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ]
+                try:
+                    browser = await p.chromium.launch(args=launch_args)
+                except Exception as e:
+                    err_msg = str(e)
+                    if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+                        logger.warning("[kugoumusic] 未找到 Playwright Chromium，正在尝试通过 npmmirror 镜像源自动下载安装...")
+                        def _install():
+                            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+                            env = os.environ.copy()
+                            env["PLAYWRIGHT_DOWNLOAD_HOST"] = "https://npmmirror.com/mirrors/playwright/"
+                            subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
+                        await asyncio.to_thread(_install)
+                        browser = await p.chromium.launch(args=launch_args)
+                    else:
+                        raise e
                 try:
                     page = await browser.new_page(
                         viewport={"width": 640, "height": 800},
@@ -1836,6 +1858,112 @@ class KugouMusicPlugin(Star):
         except ApiError as err:
             await self._reply(event, f"扫码登录失败：{err}")
         event.stop_event()
+
+    @filter.regex(re.compile(r"^#?(?:kgqq登录|kgqq扫码登录|酷狗qq登录|酷狗qq扫码登录)$", re.IGNORECASE), priority=6)
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def start_qq_qr_login(self, event: AstrMessageEvent):
+        """#kgqq登录：通过 QQ 扫码登录绑定酷狗账号"""
+        cfg = self._cfg()
+        if not cfg.get("enable", True):
+            return
+        if cfg.get("qrLoginEnable") is False:
+            await self._reply(event, "扫码登录已在配置中关闭")
+            event.stop_event()
+            return
+        user_key = self._user_key(event)
+        self._stop_poll(user_key)
+        try:
+            await self._reply(event, "正在获取 QQ 登录二维码…")
+            info = await kgapi.login_qq_qr_create()
+            qrimg = info.get("qrcode") or ""
+            if not qrimg:
+                await self._reply(event, "获取 QQ 二维码失败，请检查 API 服务")
+                event.stop_event()
+                return
+            tip_text = "请使用手机 QQ 扫码授权登录酷狗\n二维码约 2 分钟内有效"
+            qr_path = await self._save_qr_image(qrimg)
+            img_sent = False
+            if qr_path:
+                try:
+                    await self._send_chain(event, Image.fromFileSystem(qr_path), self._plain(tip_text))
+                    img_sent = True
+                except Exception:
+                    pass
+                asyncio.get_running_loop().call_later(120, lambda: self._safe_unlink(qr_path))
+            if not img_sent:
+                await self._reply(event, tip_text)
+            self._start_qq_poll(event, info, 180)
+        except ApiError as err:
+            await self._reply(event, f"QQ 扫码登录失败：{err}")
+        event.stop_event()
+
+    def _start_qq_poll(self, event: AstrMessageEvent, qr_ctx: dict, max_sec: int = 180):
+        user_key = self._user_key(event)
+        started = time.time()
+        qrsig = qr_ctx.get("qrsig") or ""
+        task = {
+            "key": f"qq_{qrsig}",
+            "ctx": qr_ctx,
+            "stopped": False,
+            "busy": False,
+            "notifiedScan": False,
+            "failStreak": 0,
+        }
+        self._active_logins[user_key] = task
+        loop = asyncio.get_running_loop()
+
+        async def _tick():
+            if task["stopped"]:
+                return
+            if task["busy"]:
+                loop.call_later(0.8, lambda: asyncio.create_task(_tick()))
+                return
+            if time.time() - started > max_sec:
+                task["stopped"] = True
+                self._active_logins.pop(user_key, None)
+                await self._reply(event, "QQ 二维码已过期，请重新 #kgqq登录")
+                return
+            task["busy"] = True
+            try:
+                check_params = {
+                    "qrsig": task["ctx"].get("qrsig") or "",
+                    "ptqrtoken": task["ctx"].get("ptqrtoken") or "",
+                    "pt_login_sig": task["ctx"].get("pt_login_sig") or "",
+                    "pt_openlogin_data": task["ctx"].get("pt_openlogin_data") or "",
+                    "xlogin_url": task["ctx"].get("xlogin_url") or "",
+                    "cookie": task["ctx"].get("cookie") or "",
+                }
+                info = await kgapi.login_qq_qr_check(check_params)
+                status = str(info.get("status") if info.get("status") is not None else "")
+                if status in ("expired", "65"):
+                    task["stopped"] = True
+                    self._active_logins.pop(user_key, None)
+                    await self._reply(event, "QQ 二维码已失效，请重新 #kgqq登录")
+                    return
+                if (status in ("wait", "66") or "扫码" in str(info.get("msg") or "")) and not task["notifiedScan"]:
+                    if "确认" in str(info.get("msg") or ""):
+                        task["notifiedScan"] = True
+                        await self._reply(event, "已扫码，请在手机 QQ 上确认授权登录")
+                elif status in ("0", "1") or info.get("token"):
+                    # 授权成功换取了 token
+                    await self._finish_login(event, info, user_key, task)
+                    return
+                task["failStreak"] = 0
+            except Exception as err:
+                task["failStreak"] += 1
+                if task["failStreak"] == 5:
+                    await self._reply(event, f"QQ 轮询暂时失败：{err}（继续重试）")
+                if task["failStreak"] >= 25:
+                    task["stopped"] = True
+                    self._active_logins.pop(user_key, None)
+                    await self._reply(event, "QQ 轮询失败过多，请检查 API 服务或重新 #kgqq登录")
+                    return
+            finally:
+                task["busy"] = False
+            if not task["stopped"] and self._active_logins.get(user_key, {}).get("key") == task["key"]:
+                task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+
+        task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
 
     def _stop_poll(self, user_key: str):
         task = self._active_logins.pop(user_key, None)

@@ -525,7 +525,8 @@ def build_help_card_data(version: str = "", cfg: dict | None = None) -> dict:
                 "title": "账号状态",
                 "tag": "全员可用",
                 "items": [
-                    {"name": "#kg登录", "desc": "扫码登录", "example": "#kg登录"},
+                    {"name": "#kg登录", "desc": "酷狗 App 扫码登录", "example": "#kg登录"},
+                    {"name": "#kgqq登录", "desc": "QQ 扫码授权登录", "example": "#kgqq登录"},
                     {"name": "#kg状态 / #kgs", "desc": "查看登录状态", "example": "#kgs"},
                     {"name": "#kg登出", "desc": "登出", "example": "#kg登出"},
                 ],

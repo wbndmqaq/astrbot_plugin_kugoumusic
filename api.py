@@ -863,6 +863,29 @@ async def qr_check(key: str) -> dict:
     }
 
 
+async def login_qq_qr_create() -> dict:
+    """QQ 扫码登录：生成二维码及上下文。"""
+    body = await request("/login/qq/qr/create", {"timestamp": int(time.time() * 1000)})
+    return body or {}
+
+
+async def login_qq_qr_check(params: dict) -> dict:
+    """QQ 扫码登录：轮询扫码状态并完成登录。"""
+    req_params = dict(params or {})
+    req_params["timestamp"] = int(time.time() * 1000)
+    body = await request("/login/qq/qr/check", req_params)
+    data = (body or {}).get("data") or {}
+    return {
+        "status": (body or {}).get("status") if "status" in (body or {}) else data.get("status"),
+        "msg": (body or {}).get("msg") or data.get("msg") or "",
+        "token": data.get("token") or (body or {}).get("token") or "",
+        "userid": data.get("userid") or (body or {}).get("userid") or "",
+        "nickname": data.get("nickname") or data.get("username") or "",
+        "data": data,
+        "body": body,
+    }
+
+
 # ──────────── 用户（需登录） ────────────
 
 

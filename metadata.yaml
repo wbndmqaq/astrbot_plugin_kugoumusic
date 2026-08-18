@@ -7,7 +7,7 @@ desc: |
   新歌速递、每日推荐、私人 FM、MV、扫码登录、音质自适配与 60s 试听降级、
   语音/文件发送、酷狗音乐链接自动解析。
   需配合 KuGouMusicApi 服务使用。
-version: 1.0.2
+version: 1.0.3
 author: wbndm
 astrbot_version: ">=4.16,<5"
 support_platforms:
