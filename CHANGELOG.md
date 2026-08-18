@@ -1,5 +1,10 @@
 # 更新日志
 
+## v1.0.4 (2026-08-18)
+
+### 🐛 修复与优化
+- **市场规范元数据补全**：`metadata.yaml` 补充 `social_link` 与 `tags` 分类标签。
+
 ## v1.0.3 (2026-08-18)
 
 ### ✨ 新功能
@@ -8,7 +13,10 @@
 
 ### 🐛 修复与优化
 
-- **Playwright Chromium 自动下载优化**：渲染卡片时若检测到未安装 Chromium 浏览器二进制，自动通过国内高速镜像源（`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/`）在后台子线程中静默安装并恢复渲染，避免卡片渲染报错崩溃。
+- **Playwright Chromium 自动安装与镜像加速**：
+  - 渲染卡片时若检测到未安装 Chromium 浏览器二进制，自动使用当前 Python 环境（`sys.executable`）在后台子线程中静默安装并恢复渲染。
+  - 自动通过国内高速镜像源（`PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/`）下载加速，避免无外网加速时下载慢或超时失败。
+  - 为 Chromium 补充 `--no-sandbox`、`--disable-setuid-sandbox`、`--disable-dev-shm-usage` 等 Docker / Linux 环境防崩溃启动参数。
 
 ## v1.0.2 (2026-08-15)
 
