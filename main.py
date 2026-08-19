@@ -24,6 +24,67 @@ from .quality import QUALITY_LABEL, trial_label
 PLUGIN_DIR = str(Path(__file__).resolve().parent)
 
 
+def _switch_apt_to_aliyun():
+    """Debian/Ubuntu 容器下把官方 apt 源换成阿里镜像，加速 install-deps 下载。
+
+    仅当存在 apt-get 且源文件指向官方域名时才改写（幂等，不覆盖用户自选镜像），
+    首次改写前备份为 .bak；任何失败只记日志不影响后续。返回是否发生了改动。
+    """
+
+    import glob
+    import shutil
+
+    if not shutil.which("apt-get"):
+        return False
+    targets = ["/etc/apt/sources.list"]
+    targets += glob.glob("/etc/apt/sources.list.d/*.sources")
+    mapping = [
+        ("http://deb.debian.org/debian", "http://mirrors.aliyun.com/debian"),
+        ("https://deb.debian.org/debian", "http://mirrors.aliyun.com/debian"),
+        ("http://security.debian.org/debian-security", "http://mirrors.aliyun.com/debian-security"),
+        ("https://security.debian.org/debian-security", "http://mirrors.aliyun.com/debian-security"),
+        ("http://archive.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
+        ("https://archive.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
+        ("http://security.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
+        ("https://security.ubuntu.com/ubuntu", "http://mirrors.aliyun.com/ubuntu"),
+    ]
+    changed = False
+    for path in targets:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            content = None
+        if content is None:
+            continue
+        new_content = content
+        for old, new in mapping:
+            if old in new_content:
+                new_content = new_content.replace(old, new)
+        if new_content == content:
+            continue
+        bak = path + ".bak"
+        try:
+            if not os.path.exists(bak):
+                with open(bak, "w", encoding="utf-8") as f:
+                    f.write(content)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+        except Exception as e:
+            logger.warning(f"[kugoumusic] apt 源改写失败 {path}: {e}")
+            continue
+        changed = True
+        logger.info(f"[kugoumusic] apt 源 {path} 已切换阿里镜像（原文件备份为 {bak}）")
+    if changed:
+        try:
+            subprocess.run(["apt-get", "update"], capture_output=True, text=True, check=False, timeout=300)
+        except Exception as e:
+            logger.warning(f"[kugoumusic] apt-get update 失败: {e}")
+    return changed
+
+
 def _is_plugin_command_msg(msg: str) -> bool:
     return bool(
         re.match(
@@ -225,6 +286,111 @@ class KugouMusicPlugin(Star):
         artists = await kgapi.search(kw, "author", pagesize=5)
         return artists[0] if artists else None
 
+    # ──────────── 先选歌再操作 ────────────
+
+    async def _start_select(self, event, action: str, kw: str, *, label: str, verb: str) -> None:
+        """进入"先选歌再操作"流程。
+
+        带关键词→搜索出候选列表；不带→复用会话列表（无列表则提示先搜）。
+        列表写入会话并记录 ``action``（#kg听N 消费后一次性执行，用完恢复播放）。
+        """
+        scope = self._scope(event)
+        session = await cardlib.SessionStore.get(self, scope)
+        if (kw or "").strip():
+            page_size = min(int(self._cfg().get("maxList") or 10), 20)
+            lst = await kgapi.search(kw, "song", pagesize=page_size)
+            if not lst:
+                await self._reply(event, f"没有搜到「{kw}」")
+                return
+            keyword = kw
+        else:
+            lst = (session or {}).get("data") or []
+            if not lst:
+                await self._reply(
+                    event,
+                    f"用法：先 #kg点歌 关键词 选中歌曲，再发 #kg{label}；或直接 #kg{label} 关键词 选择",
+                )
+                return
+            keyword = (session or {}).get("keyword") or "当前会话"
+        base = dict(session) if session else {}
+        base.update({"type": "kg_songs", "keyword": keyword, "data": lst, "action": action})
+        await cardlib.SessionStore.set(self, scope, base)
+        tip = f"回复 #kg听N 即可{verb}"
+        text = cardlib.format_song_list(lst, keyword, tip=tip)
+        if self._cfg().get("renderListCard", True):
+            data = cardlib.build_list_card_data(keyword, lst, options={"tip": tip}, cfg=self._cfg())
+            if await self._reply_card_or_text(event, tpl_name="kg-list", data=data, format_text=lambda d: text):
+                return
+        await self._reply(event, text)
+
+    async def _show_lyric(self, event, song: dict) -> None:
+        lines = await self._fetch_lyric(song)
+        if not lines:
+            await self._reply(event, "该歌曲暂无歌词")
+            return
+        data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
+        await self._reply_card_or_text(
+            event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
+        )
+
+    async def _show_lyric_word(self, event, song: dict) -> None:
+        lines = await self._fetch_krc_lyric(song)
+        if not lines:
+            await self._reply(event, "该歌曲暂无逐字歌词")
+            return
+        data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
+        data["tip"] = "逐字歌词来自酷狗音乐"
+        await self._reply_card_or_text(
+            event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
+        )
+
+    async def _show_comment(self, event, song: dict) -> None:
+        mix = song.get("mixsongid") or song.get("id") or ""
+        if not mix:
+            await self._reply(event, "无法获取该歌曲评论（缺少歌曲 ID）")
+            return
+        r = await kgapi.comment_music(mix, pagesize=20)
+        if not r.get("comments"):
+            await self._reply(event, "该歌曲暂无评论")
+            return
+        data = cardlib.build_comment_card_data(song, r["comments"], total=r.get("count"))
+        await self._reply_card_or_text(
+            event,
+            tpl_name="kg-comment",
+            data=data,
+            format_text=lambda d: cardlib.format_comment_text(song, r["comments"]),
+        )
+
+    async def _show_mv(self, event, song: dict) -> None:
+        mvs = await kgapi.search(song.get("name") or "", "mv", pagesize=5)
+        if not mvs:
+            await self._reply(event, "该歌曲暂无 MV")
+            return
+        mv_item = mvs[0]
+        url = await kgapi.video_url(mv_item.get("id") or "")
+        lines = [
+            f"🎬 MV：{mv_item.get('name') or ''} - {mv_item.get('artist') or ''}",
+            f"时长：{mv_item.get('duration') or '未知'}",
+        ]
+        if url:
+            lines.append(f"播放：{url}")
+        else:
+            lines.append("⚠ 未获取到 MV 播放地址（可能需登录）")
+        await self._reply(event, "\n".join(lines))
+
+    async def _show_favorite(self, event, song: dict) -> None:
+        mix = song.get("mixsongid") or song.get("id") or ""
+        cnt = await kgapi.favorite_count(mix)
+        await self._reply(event, f"⭐ 收藏数：{cnt or '未知'}\n♪ {song['name']} - {song['artist']}")
+
+    async def _show_versions(self, event, song: dict) -> None:
+        mix = song.get("mixsongid") or song.get("id") or ""
+        songs = await kgapi.related_songs(mix)
+        if not songs:
+            await self._reply(event, "暂无其他版本")
+            return
+        await self._list_to_session(event, f"更多版本 · {song['name']}", songs)
+
     # ──────────── 登录态 ────────────
 
     def _has_cookie(self) -> bool:
@@ -340,6 +506,34 @@ class KugouMusicPlugin(Star):
                             subprocess.run(cmd, capture_output=True, text=True, env=env, check=True)
                         await asyncio.to_thread(_install)
                         browser = await p.chromium.launch(args=launch_args)
+                    elif "error while loading shared libraries" in err_msg or "shared object file" in err_msg:
+                        # 二进制已下载但容器缺系统运行库（libnspr4/libnss3 等）。
+                        # playwright install 只下载二进制、不装 OS 包；先切阿里 apt 源再
+                        # install-deps（需 apt + root），失败则给出可直接执行的安装命令。
+                        logger.warning("[kugoumusic] Chromium 缺少系统运行库，尝试执行 playwright install-deps 自动安装...")
+                        def _install_deps():
+                            _switch_apt_to_aliyun()
+                            cmd = [sys.executable, "-m", "playwright", "install-deps", "chromium"]
+                            env = os.environ.copy()
+                            env["PLAYWRIGHT_DOWNLOAD_HOST"] = "https://npmmirror.com/mirrors/playwright/"
+                            return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
+                        res = await asyncio.to_thread(_install_deps)
+                        if res.returncode == 0:
+                            logger.info("[kugoumusic] playwright install-deps 完成，重新启动浏览器...")
+                            browser = await p.chromium.launch(args=launch_args)
+                        else:
+                            hint = (
+                                "请在容器内以 root 执行：\n"
+                                "python -m playwright install-deps chromium\n"
+                                "或手动：apt-get update && apt-get install -y libnspr4 libnss3 "
+                                "libx11-xcb1 libxcb1 libxcomposite1 libxdamage1 libxfixes3 "
+                                "libxrandr2 libgbm1 libasound2 libatk1.0-0 libatk-bridge2.0-0 "
+                                "libcairo2 libcups2 libdrm2 libxkbcommon0 libxext6 libpango-1.0-0"
+                            )
+                            logger.error(
+                                f"[kugoumusic] 自动安装系统依赖失败，请手动安装后重试：\n{hint}\n\n安装输出：\n{res.stdout[-2000:]}\n{res.stderr[-2000:]}"
+                            )
+                            raise
                     else:
                         raise e
                 try:
@@ -455,7 +649,7 @@ class KugouMusicPlugin(Star):
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#?\s*听\s*([1-9][0-9]?)$", re.IGNORECASE))
     async def choose_song(self, event: AstrMessageEvent):
-        """#kg听N：播放当前酷狗点歌列表第 N 首（可只发 #听N）"""
+        """#kg听N：播放当前酷狗点歌列表第 N 首；若会话有待办动作（#kg歌词 等先选歌）则先执行该动作"""
         cfg = self._cfg()
         if not cfg.get("enable", True) or cfg.get("enableSongRequest") is False:
             return
@@ -474,11 +668,28 @@ class KugouMusicPlugin(Star):
             event.stop_event()
             return
         song = songs[n - 1]
+        action = session.get("action") or "play"
+        # 待办动作一次性消费：先清掉 action，避免下次 #听N 误触发
+        if action != "play":
+            await cardlib.SessionStore.set(self, scope, {**session, "action": "play"})
         try:
-            await self._play_song(event, song, source="点歌")
+            if action == "lyric":
+                await self._show_lyric(event, song)
+            elif action == "lyric_word":
+                await self._show_lyric_word(event, song)
+            elif action == "comment":
+                await self._show_comment(event, song)
+            elif action == "mv":
+                await self._show_mv(event, song)
+            elif action == "favorite":
+                await self._show_favorite(event, song)
+            elif action == "versions":
+                await self._show_versions(event, song)
+            else:
+                await self._play_song(event, song, source="点歌")
         except ApiError as err:
-            self._log_warn(f"播放失败: {err}")
-            await self._reply(event, f"播放失败：{err}")
+            self._log_warn(f"执行失败: {err}")
+            await self._reply(event, f"操作失败：{err}")
         event.stop_event()
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*播放\s*(.+)$", re.IGNORECASE))
@@ -532,35 +743,13 @@ class KugouMusicPlugin(Star):
                 break
         return out
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*歌词\s*(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*歌词\s*(.*)$", re.IGNORECASE))
     async def get_lyric(self, event: AstrMessageEvent):
-        """#kg歌词 关键词|hash：获取歌词"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*歌词\s*(.+)$")
+        """#kg歌词 [关键词]：先选歌（回复 #kg听N）再显示歌词"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*歌词\s*(.*)$")
         if not m:
             return
-        kw = m.group(1).strip()
-        if not kw:
-            await self._reply(event, "用法：#kg歌词 关键词 或 #kg歌词 歌曲hash")
-            event.stop_event()
-            return
-        try:
-            song = await self._resolve_song(kw)
-            if not song:
-                await self._reply(event, f"没有搜到「{kw}」")
-                event.stop_event()
-                return
-            lines = await self._fetch_lyric(song)
-            if not lines:
-                await self._reply(event, "该歌曲暂无歌词")
-                event.stop_event()
-                return
-            data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
-            await self._reply_card_or_text(
-                event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
-            )
-        except ApiError as err:
-            self._log_warn(f"歌词失败: {err}")
-            await self._reply(event, f"获取歌词失败：{err}")
+        await self._start_select(event, "lyric", m.group(1).strip(), label="歌词", verb="查看歌词")
         event.stop_event()
 
     async def _fetch_krc_lyric(self, song: dict) -> list:
@@ -585,32 +774,13 @@ class KugouMusicPlugin(Star):
                 break
         return out
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*逐字歌词\s+(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*逐字歌词\s*(.*)$", re.IGNORECASE))
     async def lyric_word(self, event: AstrMessageEvent):
-        """#kg逐字歌词 关键词|hash：KRC 逐字歌词"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*逐字歌词\s+(.+)$")
+        """#kg逐字歌词 [关键词]：先选歌（回复 #kg听N）再显示 KRC 逐字歌词"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*逐字歌词\s*(.*)$")
         if not m:
             return
-        kw = m.group(1).strip()
-        try:
-            song = await self._resolve_song(kw)
-            if not song:
-                await self._reply(event, f"没有搜到「{kw}」")
-                event.stop_event()
-                return
-            lines = await self._fetch_krc_lyric(song)
-            if not lines:
-                await self._reply(event, "该歌曲暂无逐字歌词")
-                event.stop_event()
-                return
-            data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
-            data["tip"] = "逐字歌词来自酷狗音乐"
-            await self._reply_card_or_text(
-                event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
-            )
-        except ApiError as err:
-            self._log_warn(f"逐字歌词失败: {err}")
-            await self._reply(event, f"获取逐字歌词失败：{err}")
+        await self._start_select(event, "lyric_word", m.group(1).strip(), label="逐字歌词", verb="查看逐字歌词")
         event.stop_event()
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*热搜$", re.IGNORECASE))
@@ -802,39 +972,13 @@ class KugouMusicPlugin(Star):
             await self._reply(event, f"获取歌单失败：{err}")
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*评论\s+(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*评论\s*(.*)$", re.IGNORECASE))
     async def get_comment(self, event: AstrMessageEvent):
-        """#kg评论 关键词：获取歌曲热评"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*评论\s+(.+)$")
+        """#kg评论 [关键词]：先选歌（回复 #kg听N）再显示歌曲热评"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*评论\s*(.*)$")
         if not m:
             return
-        kw = m.group(1).strip()
-        try:
-            song = await self._resolve_song(kw)
-            if not song:
-                await self._reply(event, f"没有搜到「{kw}」")
-                event.stop_event()
-                return
-            mix = song.get("mixsongid") or song.get("id") or ""
-            if not mix:
-                await self._reply(event, "无法获取该歌曲评论（缺少歌曲 ID）")
-                event.stop_event()
-                return
-            r = await kgapi.comment_music(mix, pagesize=20)
-            if not r.get("comments"):
-                await self._reply(event, "该歌曲暂无评论")
-                event.stop_event()
-                return
-            data = cardlib.build_comment_card_data(song, r["comments"], total=r.get("count"))
-            await self._reply_card_or_text(
-                event,
-                tpl_name="kg-comment",
-                data=data,
-                format_text=lambda d: cardlib.format_comment_text(song, r["comments"]),
-            )
-        except ApiError as err:
-            self._log_warn(f"评论失败: {err}")
-            await self._reply(event, f"获取评论失败：{err}")
+        await self._start_select(event, "comment", m.group(1).strip(), label="评论", verb="查看评论")
         event.stop_event()
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*新歌\s*$", re.IGNORECASE))
@@ -945,33 +1089,13 @@ class KugouMusicPlugin(Star):
             await self._reply(event, f"获取搜索建议失败：{err}")
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*MV\s+(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*MV\s*(.*)$", re.IGNORECASE))
     async def mv(self, event: AstrMessageEvent):
-        """#kgMV 关键词：查看 MV 详情与播放链接"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*MV\s+(.+)$")
+        """#kgMV [关键词]：先选歌（回复 #kg听N）再查看 MV 详情与播放链接"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*MV\s*(.*)$")
         if not m:
             return
-        kw = m.group(1).strip()
-        try:
-            mvs = await kgapi.search(kw, "mv", pagesize=5)
-            if not mvs:
-                await self._reply(event, f"没有搜到「{kw}」的 MV")
-                event.stop_event()
-                return
-            mv_item = mvs[0]
-            url = await kgapi.video_url(mv_item.get("id") or "")
-            lines = [
-                f"🎬 MV：{mv_item.get('name') or ''} - {mv_item.get('artist') or ''}",
-                f"时长：{mv_item.get('duration') or '未知'}",
-            ]
-            if url:
-                lines.append(f"播放：{url}")
-            else:
-                lines.append("⚠ 未获取到 MV 播放地址（可能需登录）")
-            await self._reply(event, "\n".join(lines))
-        except ApiError as err:
-            self._log_warn(f"MV 失败: {err}")
-            await self._reply(event, f"获取 MV 失败：{err}")
+        await self._start_select(event, "mv", m.group(1).strip(), label="MV", verb="查看MV")
         event.stop_event()
 
     # ══════════════════ 发现 · 扩展 ══════════════════
@@ -1303,53 +1427,22 @@ class KugouMusicPlugin(Star):
             await self._reply(event, f"获取 AI 推荐失败：{err}")
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*收藏\s+(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*收藏\s*(.*)$", re.IGNORECASE))
     async def favorite_cmd(self, event: AstrMessageEvent):
-        """#kg收藏 关键词：歌曲收藏数"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*收藏\s+(.+)$")
+        """#kg收藏 [关键词]：先选歌（回复 #kg听N）再查看歌曲收藏数"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*收藏\s*(.*)$")
         if not m:
             return
-        kw = m.group(1).strip()
-        try:
-            song = await self._resolve_song(kw)
-            if not song:
-                await self._reply(event, f"没有搜到「{kw}」")
-                event.stop_event()
-                return
-            mix = song.get("mixsongid") or song.get("id") or ""
-            cnt = await kgapi.favorite_count(mix)
-            await self._reply(
-                event,
-                f"⭐ 收藏数：{cnt or '未知'}\n♪ {song['name']} - {song['artist']}",
-            )
-        except ApiError as err:
-            self._log_warn(f"收藏数失败: {err}")
-            await self._reply(event, f"获取收藏数失败：{err}")
+        await self._start_select(event, "favorite", m.group(1).strip(), label="收藏", verb="查看收藏数")
         event.stop_event()
 
-    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*(版本|相似)\s+(.+)$", re.IGNORECASE))
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*(版本|相似)\s*(.*)$", re.IGNORECASE))
     async def song_versions(self, event: AstrMessageEvent):
-        """#kg版本 关键词：同一首歌的其他版本（翻唱/remix等）"""
-        m = self._cmd(event, r"^#?(?:kg|KG)\s*(?:版本|相似)\s+(.+)$")
+        """#kg版本 [关键词]：先选歌（回复 #kg听N）再查看同一首歌的其他版本"""
+        m = self._cmd(event, r"^#?(?:kg|KG)\s*(?:版本|相似)\s*(.*)$")
         if not m:
             return
-        kw = m.group(2).strip()
-        try:
-            song = await self._resolve_song(kw)
-            if not song:
-                await self._reply(event, f"没有搜到「{kw}」")
-                event.stop_event()
-                return
-            mix = song.get("mixsongid") or song.get("id") or ""
-            songs = await kgapi.related_songs(mix)
-            if not songs:
-                await self._reply(event, "暂无其他版本")
-                event.stop_event()
-                return
-            await self._list_to_session(event, f"更多版本 · {song['name']}", songs)
-        except ApiError as err:
-            self._log_warn(f"版本失败: {err}")
-            await self._reply(event, f"获取更多版本失败：{err}")
+        await self._start_select(event, "versions", m.group(2).strip(), label="版本", verb="查看其他版本")
         event.stop_event()
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*歌手专辑\s+(.+)$", re.IGNORECASE))
