@@ -5,8 +5,6 @@ import json
 import os
 import random
 import re
-import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -22,6 +20,9 @@ from .delivery import deliver_song
 from .quality import QUALITY_LABEL, trial_label
 
 PLUGIN_DIR = str(Path(__file__).resolve().parent)
+
+# #kg听所有 连播上限（防止误触发刷屏/大量下载）
+_PLAY_ALL_LIMIT = 30
 
 
 def _is_plugin_command_msg(msg: str) -> bool:
@@ -54,10 +55,17 @@ def _collect_message_text(event: AstrMessageEvent) -> str:
         from astrbot.api.message_components import Plain as _Plain
 
         for seg in chain:
+            seg_type = type(seg).__name__
             if isinstance(seg, _Plain):
                 t = seg.text if hasattr(seg, "text") else None
                 if t:
                     parts.append(str(t))
+            elif seg_type == "Json":
+                # OneBot json 段（音乐分享卡片）：适配器不写入 message_str，
+                # 必须从组件 data 里取 ark JSON，否则分享卡永远解析不到
+                d = getattr(seg, "data", None)
+                if d:
+                    parts.append(str(d))
     except Exception:
         pass
     try:
@@ -267,21 +275,34 @@ class KugouMusicPlugin(Star):
         if not lines:
             await self._reply(event, "该歌曲暂无歌词")
             return
-        data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
-        await self._reply_card_or_text(
-            event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
-        )
+        await self._send_lyric_pages(event, song, lines, base_tip="歌词来自酷狗音乐")
 
     async def _show_lyric_word(self, event, song: dict) -> None:
         lines = await self._fetch_krc_lyric(song)
         if not lines:
-            await self._reply(event, "该歌曲暂无逐字歌词")
+            # 无逐字歌词时退回普通歌词，避免只给一句死提示
+            await self._reply(event, "该歌曲暂无逐字歌词，已改为显示普通歌词")
+            await self._show_lyric(event, song)
             return
-        data = cardlib.build_lyric_card_data(song, lines, line_count=len(lines))
-        data["tip"] = "逐字歌词来自酷狗音乐"
-        await self._reply_card_or_text(
-            event, tpl_name="kg-lyric", data=data, format_text=lambda d: cardlib.format_lyric_text(song, lines)
-        )
+        await self._send_lyric_pages(event, song, lines, base_tip="逐字歌词来自酷狗音乐")
+
+    async def _send_lyric_pages(self, event, song: dict, lines: list, *, base_tip: str) -> None:
+        """歌词分页发送：每页最多 36 行，分多张卡片完整展示（不再截断）。"""
+        pages = [lines[i : i + 36] for i in range(0, len(lines), 36)]
+        total = len(lines)
+        for pi, page_lines in enumerate(pages):
+            data = cardlib.build_lyric_card_data(song, page_lines, line_count=total)
+            data["tip"] = (
+                f"{base_tip} · 第 {pi + 1}/{len(pages)} 页" if len(pages) > 1 else base_tip
+            )
+            ok = await self._reply_card_or_text(
+                event,
+                tpl_name="kg-lyric",
+                data=data,
+                format_text=lambda d: cardlib.format_lyric_text(song, d.get("lines") or []),
+            )
+            if not ok:
+                break
 
     async def _show_comment(self, event, song: dict) -> None:
         mix = song.get("mixsongid") or song.get("id") or ""
@@ -555,6 +576,63 @@ class KugouMusicPlugin(Star):
             await self._reply(event, f"操作失败：{err}")
         event.stop_event()
 
+    @filter.regex(re.compile(r"^#?(?:kg|KG)\s*听\s*所有$|^#\s*听\s*所有$", re.IGNORECASE))
+    async def play_all(self, event: AstrMessageEvent):
+        """#kg听所有：依次发送当前会话列表的全部歌曲（语音+文件，上限 30 首）"""
+        cfg = self._cfg()
+        if not cfg.get("enable", True) or cfg.get("enableSongRequest") is False:
+            return
+        if not re.match(
+            r"^#?(?:kg|KG)\s*听\s*所有$|^#\s*听\s*所有$",
+            event.message_str.strip(),
+            re.IGNORECASE,
+        ):
+            return
+        scope = self._scope(event)
+        session = await cardlib.SessionStore.get(self, scope)
+        # 会话必须是本插件（kg_songs），否则不抢其它插件的 #听所有
+        if not session or session.get("type") != "kg_songs" or not session.get("data"):
+            return
+        songs = session.get("data") or []
+        batch = songs[:_PLAY_ALL_LIMIT]
+        title = session.get("keyword") or "当前列表"
+        await self._reply(
+            event,
+            f"▶ 开始连播「{title}」共 {len(batch)} 首"
+            + (f"（列表共 {len(songs)} 首，仅连播前 {_PLAY_ALL_LIMIT} 首）" if len(songs) > len(batch) else "")
+            + "，逐首下载发送需要一些时间…",
+        )
+        ok = fail = 0
+        for i, song in enumerate(batch):
+            try:
+                play = await self._resolve_play(song, cfg)
+                if not play.get("url"):
+                    fail += 1
+                    self._log_warn(f"连播 {i + 1}/{len(batch)} 无播放链: {song.get('name')}")
+                    continue
+                # 连播不发详情卡/文案/音乐卡，只发语音+文件
+                await deliver_song(
+                    self,
+                    event,
+                    song,
+                    play,
+                    cfg=cfg,
+                    plugin_dir=PLUGIN_DIR,
+                    options={"skipTextInfo": True, "skipNativeCard": True},
+                )
+                self._report_play_history(song)
+                ok += 1
+            except ApiError as err:
+                fail += 1
+                self._log_warn(f"连播 {i + 1}/{len(batch)} 失败: {err}")
+            except Exception as err:  # noqa: BLE001  # 单曲失败不中断连播
+                fail += 1
+                self._log_warn(f"连播 {i + 1}/{len(batch)} 失败: {type(err).__name__}: {err}")
+            if i < len(batch) - 1:
+                await asyncio.sleep(1)
+        await self._reply(event, f"连播完成：成功 {ok} 首，失败 {fail} 首")
+        event.stop_event()
+
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*播放\s*(.+)$", re.IGNORECASE))
     async def play_direct(self, event: AstrMessageEvent):
         """#kg播放 关键词：搜索并直接播放第一首"""
@@ -593,7 +671,8 @@ class KugouMusicPlugin(Star):
         return self._extract_lyric_lines(content)
 
     @staticmethod
-    def _extract_lyric_lines(lrc: str, max_lines: int = 36) -> list:
+    def _extract_lyric_lines(lrc: str) -> list:
+        """LRC 文本 → 纯文本行，完整返回（分页由调用方处理）。"""
         def _strip_meta(lines):
             return [l for l in lines if not re.match(r"^\s*\[(ti|ar|al|by|offset|total):", l, re.IGNORECASE)]
 
@@ -602,8 +681,6 @@ class KugouMusicPlugin(Star):
             t = re.sub(r"^\[[^\]]*\]", "", l).strip()
             if t:
                 out.append(t)
-            if len(out) >= max_lines:
-                break
         return out
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*歌词\s*(.*)$", re.IGNORECASE))
@@ -633,8 +710,6 @@ class KugouMusicPlugin(Star):
             t = re.sub(r"<[^>]*>", "", t).strip()  # KRC 逐字标签
             if t:
                 out.append(t)
-            if len(out) >= 36:
-                break
         return out
 
     @filter.regex(re.compile(r"^#?(?:kg|KG)\s*逐字歌词\s*(.*)$", re.IGNORECASE))
@@ -2167,16 +2242,25 @@ class KugouMusicPlugin(Star):
 
     # ══════════════════ 链接自动解析 ══════════════════
 
-    @filter.regex(re.compile(r"kugou\.com|kugou\.net", re.IGNORECASE))
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
     async def resolve(self, event: AstrMessageEvent):
-        """酷狗音乐链接自动解析"""
+        """酷狗音乐分享卡片/链接自动解析。
+
+        用全量事件而非 @filter.regex：OneBot json 段（分享卡片）不会写入
+        message_str，regex 过滤器永远匹配不到 → 群里发卡片无反应。
+        """
         cfg = self._cfg()
         if not cfg.get("enable", True) or cfg.get("enableResolve") is False:
+            return
+        msg_str = str(event.message_str or "")
+        chain = getattr(getattr(event, "message_obj", None), "message", None) or []
+        has_json = any(type(seg).__name__ == "Json" for seg in chain)
+        if not has_json and not _is_kg_message(msg_str):
             return
         text = _collect_message_text(event)
         if not _is_kg_message(text):
             return
-        if _is_plugin_command_msg(event.message_str):
+        if _is_plugin_command_msg(msg_str):
             return
         handled = await self._handle_resolve(event, text)
         if handled:

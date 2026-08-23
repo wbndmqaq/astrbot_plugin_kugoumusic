@@ -457,6 +457,7 @@ def build_help_card_data(version: str = "", cfg: dict | None = None) -> dict:
                 "items": [
                     {"name": "#kg点歌 关键词", "desc": "搜索并列出歌曲列表", "example": "#kg点歌 晴天"},
                     {"name": "#kg听N", "desc": "播放列表第 N 首", "example": "#kg听1"},
+                    {"name": "#kg听所有", "desc": "依次连播当前列表全部歌曲（上限 30 首）", "example": "#kg听所有"},
                     {"name": "#kg播放 关键词", "desc": "搜索并直接播放第一首", "example": "#kg播放 晴天"},
                     {"name": "#kg歌词 关键词|hash", "desc": "获取歌词", "example": "#kg歌词 晴天"},
                     {"name": "#kg热搜", "desc": "热搜榜", "example": "#kg热搜"},
