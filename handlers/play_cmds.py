@@ -58,6 +58,9 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
         r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#?\s*听\s*([1-9][0-9]?)$", event.message_str.strip(), re.IGNORECASE
     )
     n = int(m.group(1) or m.group(2) or 0) if m else 0
+    # 裸 #听N（无 kg 前缀）仅由最近活跃的音乐插件响应，避免多插件同装时抢占顺序取决于加载顺序
+    if m and m.group(2) and not await service.is_session_owner():
+        return
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
     # 会话必须是本插件（kg_songs），否则不抢其它插件的 #听
@@ -104,6 +107,9 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
         event.message_str.strip(),
         re.IGNORECASE,
     ):
+        return
+    # 裸 #听所有（无 kg 前缀）仅由最近活跃的音乐插件响应
+    if not re.match(r"^#?(?:kg|KG)", event.message_str.strip(), re.IGNORECASE) and not await service.is_session_owner():
         return
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)

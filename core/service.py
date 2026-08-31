@@ -41,6 +41,20 @@ GOOD_SONG_CARDS = {"精选": 1, "怀旧": 2, "热门": 3, "小众": 4, "vip": 6,
 ARTIST_LIST_TYPES = {"": 0, "全部": 0, "华语": 1, "欧美": 2, "日韩": 3, "其他": 4, "日本": 5, "韩国": 6}
 
 
+def _owner_marker_path() -> Path:
+    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。
+
+    用于裸 #听N 的跨插件抢占：点歌出列表时写入本插件名，裸 #听N 仅由最近
+    活跃的插件响应，避免多插件同装时抢占顺序取决于插件加载顺序。
+    """
+    try:
+        from astrbot.api.star import StarTools
+
+        return Path(StarTools.get_data_dir()).parent / "_music_session_owner.json"
+    except Exception:
+        return Path(__file__).resolve().parent.parent / "_music_session_owner.json"
+
+
 def is_plugin_command_msg(msg: str) -> bool:
     return bool(
         re.match(
@@ -103,6 +117,43 @@ class MusicService:
         # 注入配置访问器给 api 模块
         kgapi.set_config_getter(lambda: self.plugin.config or {})
 
+    # ──────────── 裸 #听N 跨插件抢占 ────────────
+
+    async def mark_session_owner(self) -> None:
+        """点歌出列表后，把本插件记录为「最近活跃的音乐插件」。"""
+        name = str(getattr(self.plugin, "name", "") or "")
+
+        def _w():
+            try:
+                p = _owner_marker_path()
+                p.parent.mkdir(parents=True, exist_ok=True)
+                tmp = p.with_name(p.name + ".tmp")
+                tmp.write_text(
+                    json.dumps({"plugin": name, "ts": int(time.time())}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, p)  # 原子替换，避免并发写坏
+            except Exception:
+                pass
+
+        await asyncio.to_thread(_w)
+
+    async def is_session_owner(self) -> bool:
+        """本插件是否为最近活跃的音乐插件（无标记时视为 True，退化为「谁有会话谁响应」）。"""
+        name = str(getattr(self.plugin, "name", "") or "")
+
+        def _r() -> bool:
+            try:
+                p = _owner_marker_path()
+                if not p.exists():
+                    return True
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return data.get("plugin") == name
+            except Exception:
+                return True
+
+        return await asyncio.to_thread(_r)
+
     # ──────────── 生命周期 ────────────
 
     async def initialize(self):
@@ -140,9 +191,11 @@ class MusicService:
             except Exception as e:
                 self.log_warn(f"持久化设备 Cookie 失败: {e}")
 
-    def terminate(self):
+    async def terminate(self):
         for user_key in list(self.active_logins.keys()):
             self.stop_poll(user_key)
+        # 关闭复用的 aiohttp 会话，避免热重载后残留连接
+        await kgapi.close_session()
 
     # ──────────── 辅助 ────────────
 
@@ -285,6 +338,7 @@ class MusicService:
         base = dict(session) if session else {}
         base.update({"type": "kg_songs", "keyword": keyword, "data": lst, "action": action})
         await cardlib.SessionStore.set(self.plugin, scope, base)
+        await self.mark_session_owner()
         tip = f"回复 #kg听N 即可{verb}"
         text = cardlib.format_song_list(lst, keyword, tip=tip)
         if self.cfg().get("renderListCard", True):
@@ -447,6 +501,7 @@ class MusicService:
     async def list_to_session(self, event: AstrMessageEvent, keyword: str, songs: list, *, tip: str = "") -> bool:
         scope = self.scope(event)
         await cardlib.SessionStore.set(self.plugin, scope, {"type": "kg_songs", "keyword": keyword, "data": songs})
+        await self.mark_session_owner()
         text = cardlib.format_song_list(songs, keyword, tip=tip)
         if self.cfg().get("renderListCard", True):
             data = cardlib.build_list_card_data(keyword, songs, options={"tip": tip}, cfg=self.cfg())
@@ -582,24 +637,44 @@ class MusicService:
 
     def stop_poll(self, user_key: str):
         task = self.active_logins.pop(user_key, None)
-        if task and task.get("timer") is not None:
+        if not task:
+            return
+        task["stopped"] = True
+        if task.get("timer") is not None:
             try:
                 task["timer"].cancel()
             except Exception:
                 pass
+        # 取消所有已创建但仍在运行的 _tick 轮询任务，避免重载/登出后残留协程对旧 event 发消息
+        for job in task.get("jobs") or []:
+            if job and hasattr(job, "cancel"):
+                try:
+                    job.cancel()
+                except Exception:
+                    pass
 
     def start_poll(self, event: AstrMessageEvent, key: str, max_sec: int = 300):
         user_key = self.user_key(event)
         started = time.time()
-        task = {"key": key, "stopped": False, "busy": False, "notifiedScan": False, "failStreak": 0}
+        task = {"key": key, "stopped": False, "busy": False, "notifiedScan": False, "failStreak": 0, "jobs": []}
         self.active_logins[user_key] = task
         loop = asyncio.get_running_loop()
+
+        def _spawn():
+            t = asyncio.create_task(_tick())
+            task["jobs"].append(t)
+            return t
+
+        def _schedule(delay: float):
+            handle = loop.call_later(delay, _spawn)
+            task["jobs"].append(handle)
+            return handle
 
         async def _tick():
             if task["stopped"]:
                 return
             if task["busy"]:
-                loop.call_later(0.8, lambda: asyncio.create_task(_tick()))
+                _schedule(0.8)
                 return
             if time.time() - started > max_sec:
                 task["stopped"] = True
@@ -634,9 +709,9 @@ class MusicService:
             finally:
                 task["busy"] = False
             if not task["stopped"] and self.active_logins.get(user_key, {}).get("key") == key:
-                task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+                task["timer"] = _schedule(2)
 
-        task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+        task["timer"] = _schedule(2)
 
     def start_qq_poll(self, event: AstrMessageEvent, qr_ctx: dict, max_sec: int = 180):
         user_key = self.user_key(event)
@@ -649,15 +724,26 @@ class MusicService:
             "busy": False,
             "notifiedScan": False,
             "failStreak": 0,
+            "jobs": [],
         }
         self.active_logins[user_key] = task
         loop = asyncio.get_running_loop()
+
+        def _spawn():
+            t = asyncio.create_task(_tick())
+            task["jobs"].append(t)
+            return t
+
+        def _schedule(delay: float):
+            handle = loop.call_later(delay, _spawn)
+            task["jobs"].append(handle)
+            return handle
 
         async def _tick():
             if task["stopped"]:
                 return
             if task["busy"]:
-                loop.call_later(0.8, lambda: asyncio.create_task(_tick()))
+                _schedule(0.8)
                 return
             if time.time() - started > max_sec:
                 task["stopped"] = True
@@ -702,9 +788,9 @@ class MusicService:
             finally:
                 task["busy"] = False
             if not task["stopped"] and self.active_logins.get(user_key, {}).get("key") == task["key"]:
-                task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+                task["timer"] = _schedule(2)
 
-        task["timer"] = loop.call_later(2, lambda: asyncio.create_task(_tick()))
+        task["timer"] = _schedule(2)
 
     async def finish_login(self, event: AstrMessageEvent, info: dict, user_key: str, task: dict):
         task["stopped"] = True

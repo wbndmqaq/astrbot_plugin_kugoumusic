@@ -55,25 +55,24 @@ def hash_for_quality(song: dict, quality: str) -> str:
 
     蝰蛇系（viper_tape/viper_clear/viper_atmos）与 super 没有独立 hash 字段，
     由最高无损源（hash_super → hash_high → hash_flac）派生，属尽力而为。
+
+    注：_normalize_song 已把 HQ/SQ/Res 等原始字典拍平成 hash_320/hash_flac/hash_high
+    等扁平字段，此处不再回退原始字典。
     """
     q = (quality or "").lower()
     if q in ("viper_tape", "viper_clear", "viper_atmos", "super"):
         return _first(
             song.get("hash_super"),
             song.get("hash_high"),
-            (song.get("Res") or {}).get("Hash"),
             song.get("hash_flac"),
-            (song.get("SQ") or {}).get("Hash"),
         )
     if q == "high":
         return _first(
             song.get("hash_high"),
-            (song.get("Res") or {}).get("Hash"),
             song.get("hash_flac"),
-            (song.get("SQ") or {}).get("Hash"),
         )
     if q == "flac":
-        return _first(song.get("hash_flac"), (song.get("SQ") or {}).get("Hash"))
+        return _first(song.get("hash_flac"), song.get("hash_high"))
     if q == "320":
-        return _first(song.get("hash_320"), (song.get("HQ") or {}).get("Hash"))
+        return _first(song.get("hash_320"), song.get("hash_flac"))
     return _first(song.get("hash_128"), song.get("hash"), song.get("FileHash"))

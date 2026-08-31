@@ -293,7 +293,7 @@ QQ 官方机器人接口与 OneBot 差异较大，插件做了专项适配：
 astrbot_plugin_kugoumusic/
 ├── main.py                  # 插件生命周期入口与路由绑定（~50行）
 ├── __init__.py              # 顶层包入口
-├── metadata.yaml            # 插件元信息（v2.0.0）
+├── metadata.yaml            # 插件元信息
 ├── _conf_schema.json        # 配置定义 Schema
 ├── README.md                # 插件文档
 ├── CHANGELOG.md             # 更新日志

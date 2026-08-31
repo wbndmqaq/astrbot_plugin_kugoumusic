@@ -78,6 +78,28 @@ def _compose_cookie_str(*, anon: bool = False) -> str:
     return ";".join(x for x in parts if x)
 
 
+# ──────────── 复用 HTTP 会话 ────────────
+
+# 模块级 aiohttp.ClientSession 复用：避免每请求新建会话（反复 TCP 握手 + DNS 解析）。
+# 会话由 service.terminate() 调 close_session() 统一关闭；懒加载，未使用时不会创建。
+_session: aiohttp.ClientSession | None = None
+
+
+def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession()
+    return _session
+
+
+async def close_session() -> None:
+    """关闭并释放复用的 HTTP 会话（插件卸载/重载时由 service 调用）。"""
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
+
+
 # ──────────── 基础请求 ────────────
 
 
@@ -148,14 +170,14 @@ async def request(
 
     timeout = aiohttp.ClientTimeout(total=20)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as sess:
-            if method == "get":
-                async with sess.get(url, params=_query_safe_params(params)) as res:
-                    return await _handle_response(res, pathname)
-            else:
-                # POST 体同样带上 cookie（服务端 query/body 的 cookie 都会被解析合并）
-                async with sess.post(url, data=_query_safe_params(params)) as res:
-                    return await _handle_response(res, pathname)
+        sess = _get_session()
+        if method == "get":
+            async with sess.get(url, params=_query_safe_params(params), timeout=timeout) as res:
+                return await _handle_response(res, pathname)
+        else:
+            # POST 体同样带上 cookie（服务端 query/body 的 cookie 都会被解析合并）
+            async with sess.post(url, data=_query_safe_params(params), timeout=timeout) as res:
+                return await _handle_response(res, pathname)
     except aiohttp.ClientConnectorError as e:
         raise ApiError(f"无法连接酷狗 API（{base}），请确认 KuGouMusicApi 服务已启动") from e
     except aiohttp.ServerTimeoutError as e:
