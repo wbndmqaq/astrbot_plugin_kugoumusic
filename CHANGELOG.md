@@ -1,5 +1,40 @@
 # 更新日志
 
+## v2.0.2 (2026-09-12)
+
+### 🐛 缺陷修复
+
+- **拆包后所有播放路径运行时死亡**：`core/api/_song.py` 内 `from .quality import ...` 在拆包后指向不存在的 `core.api.quality`（函数内导入，加载不报错、首次播放才炸 `ModuleNotFoundError` 且 handler 接不住、用户零回复）。改为 `..quality`。
+- **每次播放/每张卡片抛 `NameError`**：`delivery.py` 用了 `safe_int` 却没导入——音频发出后抛异常，且清理定时器永不登记，temp 目录永不清理。已补导入。
+- **语音/文件通道的文案被写成元组**：`('', True)` 字面量直接发给协议端；现按元组解包。
+- **`#kgqq登录` 永远失败**：设备 cookie 覆盖了会话 cookie（`qrsig` 丢失必然 502），改为合并而非覆盖。
+- **上报听歌历史发错参数名**（`ot` → `time`）；单曲投递失败不再上报（与连播按真实结果计数同口径）。
+- **`#kg听所有` 成功数虚高**：投递层如实返回双通道是否发出，连播按真实结果计数。
+- **6 处裸 `int(cfg.get(...))`**：WebUI 清空字段或填非数字时抛 `TypeError`（handler 接不住，零回复）；统一改走 `safe_int`/`cfg_int`。
+- **QQ 官方下载失败丢弃挂起的歌曲信息文案**：现把挂起文案拼在失败提示前一并发送。
+- **临时文件清理治理**：`keepFileSec` 清空抛 `TypeError` 且音频永不登记清理、卸载只取消不补删、`keepFileSec=0` 过早删除、定时器句柄无登记——统一为登记表 + 取消补删 + 5 秒下限。
+- **`send_chain` 只捕获 `AttributeError`**：平台侧失败穿透 handler；现默认不穿透并保留「失败即降级」链。
+- **API 总超时穿透 handler**：`asyncio.TimeoutError` 不是 `aiohttp.ClientError`，用户零回复且消息继续流向后续管道；转为带超时秒数的 `ApiError`。
+- **个人微信收不到歌曲信息文案**：wxoc 分支把文案直接置空；现与其他平台同路径发送。
+- **配置写盘「假成功」**：旧版 `await None` 吞异常仍回复成功、新版返回值未校验；统一 `MusicService.save_config()` 并如实提示。
+- **会话 TTL 锚定首次写入**：`updatedAt` 被旧值覆盖，600 秒后必失效；改让新时间戳胜出。
+- **`#kg主题歌单`/`#kg历史日推` 冲掉点歌会话**：共用同一 KV 键互相覆盖；`SessionStore` 按 `kind` 分桶。
+- **aiocqhttp 文件发送失败走错通道重试**：普通 `File` 组件跨容器必然再失败，改 base64 直发。
+- **`#kg评论数`/`#kg排行推荐` 被 `#kg评论`/`#kg排行` 吞掉**：正则重叠同优先级，补 priority。
+- **设备 dfid 注册 100% 失败**：`StarTools.get_data_dir()` 反查不到插件名必然抛错；显式传插件名。
+- **上游错误文案全部丢失**：失败响应 `{status, msg}` 的 `msg` 不在候选链里，统一降级成「HTTP 502」；新增 `_upstream_msg()` 透出。
+- **原生音乐卡片发不出去**：改 `event.bot.call_action` 直发 OneBot `music` 段。
+- **零碎修正**：`#kg排行` 榜单名空串恒真；评论数按「任意 32 位 key」取值张冠李戴；帮助卡片假统计数字（`45+`/`1.0.0`）；fire-and-forget 任务未持引用；`_deliver_local_audio` 拆分后 `finally` 变量预置恢复；`ffmpeg_compress` 推导收敛透传；帮助表补 `#kg帮助`；Jinja 渲染移入线程池；启动扫地单文件竞态。
+
+### 🧩 其他改动
+
+- `core/api.py` 拆分为按域包 `core/api/`（逐符号比对零丢失）；帮助卡片与纯文本两份手写清单合并为单一数据源 `core/help_data.py`。
+- 10 套模板直接改写标准 Jinja2（`tpl_adapter.py` 删除），按路径缓存已编译模板、首次读盘/编译/渲染在线程池；`wrap_card_data()` 缺键安全包装。
+- 临时目录固定到 `data/plugin_data/astrbot_plugin_kugoumusic/temp`（`tempDir` 配置移除），启动时清理 1 小时前的崩溃残留。
+- 移除 40 余处历史导入脚手架与多处死代码；魔法数字提具名常量；重复文案收敛 `core/messages.py`；ffmpeg 探测进程内缓存并启动预热。
+- 复用常驻 Chromium 与模块级 HTTP 会话；分享解析前置子串判断；配置写盘/版本号读取等阻塞 IO 移出事件循环。
+- 文档：KuGouMusicApi 默认端口更正为 4000（以 `server.js` 代码为准，上游 README 写 3000）；`enable` 描述、`#kg api` 示例、目录树（api 包 + help_data）、别名与 `keepFileSec` 说明同步修正。
+
 ## v2.0.1 (2026-08-31)
 
 ### ⚡ 内存与资源治理
@@ -25,7 +60,7 @@
 
 ### 🏗️ 架构升级 · 全面模块化
 
-- **声明式路由解耦**：`main.py` 精简为纯净生命周期入口（~50行），指令系统按领域拆分为 `play`（播放/连播）、`explore`（探索/榜单）、`detail`（详情/歌词）、`auth`（登录/认证）、`system`（系统/设置）、`share`（卡片与链接解析）六大独立处理器。
+- **声明式路由解耦**：`main.py` 精简为纯净生命周期入口，指令系统按领域拆分为 `play`（播放/连播）、`explore`（探索/榜单）、`detail`（详情/歌词）、`auth`（登录/认证）、`system`（系统/设置）、`share`（卡片与链接解析）六大独立处理器。
 - **业务服务下沉**：核心逻辑全面下沉至 `core/service.py`（`MusicService`），`api`、`cards`、`delivery`、`quality`、`render`、`tpl_adapter` 统一收拢至 `core/` 目录。
 
 ### ⚡ 性能与纯异步加固
@@ -43,7 +78,7 @@
 
 ### ⚡ 异步与性能加固
 
-- **全面非阻塞文件 IO**：音频大文件下载（`download_audio`）、卡片渲染 PNG 缓存（`_render_card`）、登录二维码（`_save_qr_image`）全面接入 `asyncio.to_thread(_write_bytes, ...)` 异步写入，彻底消除主事件循环因磁盘写入导致的阻塞。
+- **全面非阻塞文件 IO**：音频大文件下载（`download_audio`）、卡片渲染 PNG 落盘（`reply_card_or_text`）、登录二维码（`save_qr_image`）全面接入 `asyncio.to_thread(_write_bytes, ...)` 异步写入，彻底消除主事件循环因磁盘写入导致的阻塞。
 - **并发与作用域安全**：修正登录轮询与卡片延迟清理中的循环事件作用域引用，全面提升高并发稳定性。
 
 ### 🐛 异常与防御完善
@@ -121,8 +156,8 @@
 
 ### 🧹 质量
 
-- `_deliver_local_audio` 新增 `_ffmpeg_path` / `_compress_to_mp3` 助手；测试扩至 36 用例（压缩成功/失败/无 ffmpeg、守卫拦截压缩兜底、发送失败压缩重试）
-- 第二轮重构：`_send_file_payload` 扁平化（提前 return 消除深嵌套）；`download_audio` 改流式写入磁盘（大 FLAC 不再整块读入内存），失败时清理残留文件；测试扩至 **42 用例**（新增 download_audio 流式/过小/HTML/HTTP 错误清理 + 压缩重试失败文案兜底）
+- `_deliver_local_audio` 新增 `_ffmpeg_path` / `_compress_to_mp3` 助手；本地投递单测扩至 36 用例（压缩成功/失败/无 ffmpeg、守卫拦截压缩兜底、发送失败压缩重试）；该测试脚本未随仓库提供
+- 第二轮重构：`_send_file_payload` 扁平化（提前 return 消除深嵌套）；`download_audio` 改流式写入磁盘（大 FLAC 不再整块读入内存），失败时清理残留文件；本地单测扩至 **42 用例**（新增 download_audio 流式/过小/HTML/HTTP 错误清理 + 压缩重试失败文案兜底）；该测试脚本未随仓库提供
 
 ## v1.0.1 (2026-08-15)
 
@@ -134,7 +169,7 @@
 
 - 守卫逻辑抽成可单测的 `_should_block_qqofficial_file` / `_qq_official_chunked_upload_supported(version)`；修复拦截提示在语音未开启时误导（"改发语音"不成立）→ 改为如实提示"音频文件未发送"
 - `deliver_song` 拆分出可单测的 `_deliver_local_audio`（语音/文件双通道投递 + wxoc 降级 + 文件守卫 + 文案兜底 + 清理调度），`deliver_song` 只负责文案/卡片/下载后委托
-- 新增 `tests/test_delivery_chunked.py`（31 用例，mock 无网络）：版本检测 + 守卫决策矩阵 + 本地音频投递端到端（双发/单发/文件拦截回退语音/全部失败文案兜底/微信降级/清理调度）
+- 新增本地投递单测（31 用例，mock 无网络）：版本检测 + 守卫决策矩阵 + 本地音频投递端到端（双发/单发/文件拦截回退语音/全部失败文案兜底/微信降级/清理调度）；该测试脚本未随仓库提供
 
 ## v1.0.0 (2026-08-10)
 
@@ -160,8 +195,8 @@
 - OneBot 原生音乐卡片（type=kugou，可选）
 
 **质量**
-- 53 个指令 handler，ruff 全过、55 个 pytest mock 单测、42 项真实 API 冒烟测试
-- 10 个 art-template 卡片模板（酷狗蓝主题）
+- 首发版本 53 个指令 handler（当前 55 个），ruff 全过；另有本地 pytest mock 单测与真实 API 冒烟测试（测试脚本未随仓库提供）
+- 10 个 HTML 卡片模板（酷狗蓝主题，经 `tpl_adapter` 转换后用 Jinja2 渲染）
 
 ### 已知限制
 - 歌单曲目未登录时返回 20010，需登录 Cookie

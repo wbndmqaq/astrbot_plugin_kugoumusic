@@ -16,14 +16,14 @@
 
 - **点歌播放**：关键词搜索 → 列表卡片 → `#kg听N` 选歌，或 `#kg播放` 直接播第一首
 - **音质自适配**：`auto` 自动匹配歌曲最高可用音质并逐级降级；蝰蛇母带2.0 / 蝰蛇超清 / 蝰蛇HiFi / Hi-Res / 无损 / 320K / 128K 共 7 档；未登录 VIP 歌曲自动 60s 试听降级
-- **音频投递**：语音（silk 转码）+ 群/好友文件双通道，互不阻塞，失败自动回退
+- **音频投递**：语音（OneBot 协议端转 silk）+ 群/好友文件双通道，互不阻塞，失败自动回退
 - **多平台适配**：QQ 官方（合并消息规避额度、大文件分片上传、ffmpeg 压缩兜底、纯文本兜底）、个人微信 weixin_oc（语音自动降级为文件）、Telegram / 钉钉 / 飞书 / KOOK / Discord 原生支持语音与文件
 - **卡片渲染**：10 套酷狗蓝主题 HTML 卡片（列表/详情/歌词/热搜/评论/榜单/歌单/帮助/状态/设置），自动裁剪白边
 - **链接自动解析**：发送 `kugou.com/song/#hash=...` 分享链接，自动识别歌曲并播放
 - **扫码登录**：`#kg登录` 生成二维码，轮询自动写入 Cookie，全群共享账号
 - **账号扩展**：我的歌单、最近播放、听歌排行、云盘、已购、听歌等级、关注/取关歌手、关注歌手新歌；播放后自动上报听歌历史、登录后自动刷新 token
 - **高内聚模块化架构**：核心业务服务下沉（`core/`），声明式指令路由按领域拆分（`handlers/`），纯异步无阻塞调度
-- **临时文件自清理**：卡片图、二维码、音频文件发出后自动延时清除，`keepFileSec=0` 即时清除
+- **临时文件自清理**：卡片图、二维码、音频文件发出后自动延时清除并登记定时器句柄（卸载时统一取消），延迟下限 5 秒避免发出前被删
 
 ---
 
@@ -32,7 +32,7 @@
 | 依赖 | 说明 |
 | --- | --- |
 | **AstrBot** | `>=4.16, <5`（推荐 4.26+） |
-| **API 服务** | [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（默认 `http://127.0.0.1:3000`） |
+| **API 服务** | [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（默认 `http://127.0.0.1:4000`） |
 | **node** | api运行时环境（建议V22的LTS版本以上） |
 | **pnpm** | api依赖更新使用 |
 
@@ -43,8 +43,10 @@
 ```bash
 git clone https://github.com/MakcRe/KuGouMusicApi.git
 cd KuGouMusicApi
-npm install
-npm run dev   # 默认监听 http://localhost:3000；自定义端口：PORT=XXXX npm run dev
+pnpm install   # 仓库自带 pnpm-lock.yaml；用 npm install 也可以
+pnpm run dev   # 默认监听 http://localhost:4000
+# 注意：上游 README 写的是 3000，但代码 server.js 里 PORT 默认值是 4000，以代码为准
+# 自定义端口：PORT=XXXX pnpm run dev
 ```
 
 ### 卡片渲染环境安装教程（可选，不影响点歌播放）
@@ -122,8 +124,8 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 
 | 配置项 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `apiBase` | string | `http://127.0.0.1:3000` | KuGouMusicApi 服务地址（与插件同机部署用 127.0.0.1；自定义端口改对应地址） |
-| `enable` | bool | `true` | 插件总开关 |
+| `apiBase` | string | `""`（**必填**） | KuGouMusicApi 服务地址，如 `http://127.0.0.1:4000`（与插件同机部署用 127.0.0.1；自定义端口改对应地址）。留空时无法取链，`#kg测试` 会提示「API 未配置」 |
+| `enable` | bool | `true` | 插件功能总开关：关闭后点歌、播放、歌词、榜单、解析、登录等指令不再响应；`#kg设置`/`#kg音质`/`#kg api`/`#kg测试` 等配置类指令保留，便于自助排查与恢复 |
 | `enableSongRequest` | bool | `true` | 点歌功能开关 |
 | `enableResolve` | bool | `true` | 酷狗链接自动解析开关 |
 | `maxList` | int | `10` | 点歌列表最大显示条数（1–20） |
@@ -131,9 +133,8 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 | `trialFallback` | bool | `true` | 匿名时 VIP/付费歌曲自动发送 60s 试听片段 |
 | `sendVocal` | bool | `true` | 以语音消息方式发送音频 |
 | `uploadFile` | bool | `true` | 以群/好友文件方式发送音频 |
-| `tempDir` | string | `temp/kugou` | 临时下载目录（相对插件目录） |
 | `downloadTimeout` | int | `90000` | 音频下载超时（毫秒） |
-| `keepFileSec` | int | `60` | 临时文件保留秒数（`0` 表示发出后立即删除，作用于音频+卡片图） |
+| `keepFileSec` | int | `60` | 临时文件保留秒数（作用于音频+卡片图；实际延迟不低于 5 秒，避免协议端尚未读完就被删） |
 | `ffmpegCompress` | bool | `true` | 大文件/FLAC 无法作为文件发送时（QQ 官方无分片上传/发送失败），用 ffmpeg 压成紧凑 mp3 兜底发送 |
 | `compressBitrate` | int | `128` | 压缩兜底 mp3 码率（kbps） |
 | `identifyPrefix` | string | `识别：` | 识别提示前缀 |
@@ -158,8 +159,9 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 | --- | --- | --- |
 | `#kg点歌 关键词` | 搜索并列出歌曲 | `#kg点歌 晴天` |
 | `#kg听N` / `#听N` | 播放列表第 N 首 | `#kg听1` |
+| `#kg听所有` | 连播当前列表（最多 30 首） | `#kg听所有` |
 | `#kg播放 关键词` | 搜索并直接播放第一首 | `#kg播放 晴天` |
-| `#kg来首歌` | 随机来一首（私人 FM，未登录退每日推荐） | `#kg来首歌` |
+| `#kg来首歌` / `#kg随机` / `#kg放一首` / `#kg来一首` | 随机来一首（私人 FM，未登录退每日推荐） | `#kg来首歌` |
 | `#kg歌词 关键词\|hash` | 获取歌词 | `#kg歌词 晴天` |
 | `#kg逐字歌词 关键词\|hash` | KRC 逐字歌词 | `#kg逐字歌词 晴天` |
 | `#kg热搜` | 热搜榜 | `#kg热搜` |
@@ -171,7 +173,7 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 | `#kg排行 [榜单名]` | 排行榜列表 / 查看具体榜单 | `#kg排行 TOP500` |
 | `#kg歌手 关键词` | 歌手热门歌曲 | `#kg歌手 周杰伦` |
 | `#kg专辑 关键词` | 专辑曲目 | `#kg专辑 叶惠美` |
-| `#kg歌单 关键词` | 歌单曲目（VIP 歌单需登录） | `#kg歌单 华语` |
+| `#kg歌单 关键词\|id` | 歌单曲目（VIP 歌单需登录） | `#kg歌单 华语` |
 | `#kg评论 关键词` | 歌曲热评 | `#kg评论 晴天` |
 | `#kg版本 关键词` | 同一首歌的其他版本（翻唱/remix 等） | `#kg版本 晴天` |
 | `#kg新歌` | 新歌速递 | `#kg新歌` |
@@ -220,25 +222,28 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 
 | 指令 | 说明 |
 | --- | --- |
-| `#kg登录` | 扫码登录（生成二维码，轮询自动写入 Cookie，仅主人） |
-| `#kg状态` / `#kgs` | 查看登录状态 |
-| `#kg登出` | 登出并清除本地 Cookie（仅主人） |
+| `#kg登录` / `#kg扫码登录` / `#酷狗登录` / `#酷狗扫码登录` | 扫码登录（生成二维码，轮询自动写入 Cookie，仅主人） |
+| `#kgqq登录` / `#kgqq扫码登录` / `#酷狗qq登录` / `#酷狗qq扫码登录` | 通过 QQ 扫码登录并绑定酷狗账号（仅主人） |
+| `#kg状态` / `#kg登录状态` / `#kgs` | 查看登录状态 |
+| `#kg登出` / `#kg注销` / `#kg解绑` | 登出并清除本地 Cookie（仅主人） |
 
 ### 🛠️ 管理（仅主人）
 
 | 指令 | 说明 | 示例 |
 | --- | --- | --- |
-| `#kg设置` | 设置面板（登录态/音质/开关/脱敏 API） | `#kg设置` |
+| `#kg设置` / `#kg配置` / `#酷狗设置` | 设置面板（登录态/音质/开关/脱敏 API） | `#kg设置` |
 | `#kg音质 <档位>` | 修改音质 | `#kg音质 high` |
-| `#kg api <地址>` | 修改 API 地址 | `#kg api http://127.0.0.1:3000` |
-| `#kg测试` | 测试 API 连通性 | `#kg测试` |
-| `#kg帮助` | 帮助卡片 | `#kg帮助` |
+| `#kg api <地址>` | 修改 API 地址 | `#kg api http://127.0.0.1:4000` |
+| `#kg测试` / `#酷狗测试` | 测试 API 连通性 | `#kg测试` |
+| `#kg帮助` / `#kghelp` / `#kg菜单` | 帮助卡片 | `#kg帮助` |
 
 ### 🔗 自动解析
 
 直接发送酷狗歌曲分享链接（`kugou.com/song/#hash=...`），自动识别：
 
 - **单曲** `hash=...` → 详情卡片 + 播放
+- 链接为 `mixsongid=` 形式时不支持直接取链（KuGouMusicApi 的 `/audio` 只接受 32 位文件 hash），会明确提示改用 `#kg点歌 关键词`
+- 未能提取到 hash/mixsongid 时，会把链接去掉后按关键词搜索并播放首个结果
 
 ---
 
@@ -246,8 +251,8 @@ WebUI → 插件管理 → 本插件 → 设置面板。也可用指令热改部
 
 插件按 `sendVocal`（语音）和 `uploadFile`（文件）配置双通道投递，两者互不阻塞：
 
-1. **语音**：本地音频经 silk 转码以语音消息发送
-2. **文件**：以原始音质文件（mp3/flac 等）作为群/好友文件发送
+1. **语音**：本地音频以语音消息发送——aiocqhttp 走 `record` 段 base64 直发，由协议端（NapCat / SnowLuma 等自带 ffmpeg addon）转成 Tencent silk；其余平台走适配器原生语音发送（钉钉/飞书/KOOK/Discord 由适配器自行转码格式）
+2. **文件**：以原始音质文件（mp3/flac 等）作为群/好友文件发送；aiocqhttp 以 `base64://` 内联直发，不依赖共享挂载
 
 ### 试听降级（`trialFallback`）
 
@@ -260,14 +265,14 @@ QQ 官方机器人接口与 OneBot 差异较大，插件做了专项适配：
 - **合并消息**：文案与首个媒体合并发送，规避被动回复额度限制
 - **大文件分片上传**：AstrBot ≥ 4.27.3 的 QQ 官方适配器对本地 >10MB 文件自动走分片上传，无损 FLAC 也可作为文件发送（`qqofficialChunkedUpload` 开关，默认开）。旧版 AstrBot 或关闭该开关时保留守卫：按大小（>10MB）或后缀（`.flac`）拦截文件上传——此时开启 `ffmpegCompress`（默认开）会用 ffmpeg 压成紧凑 mp3 发送；ffmpeg 缺失/压缩失败才退回仅发语音（silk）
 - **纯文本兜底**：媒体发送失败时，文本走 `msg_type=0` 纯文本，规避 `40034011 无效 markdown` 报错
-- **原生卡片跳过**：QQ 官方无 OneBot `send_api`，原生音乐卡片自动跳过
+- **原生卡片跳过**：QQ 官方不是 OneBot 协议（无 `event.bot.call_action`），原生音乐卡片自动跳过
 
 ### 个人微信（`weixin_oc`）适配
 
 微信开放平台 ilink 通道（手机扫码登录个人微信）。weixin_oc 适配器出站**不支持语音（Record）**，`sendBySession` 只接收 Plain/Image/Video/File：
 
 - **语音自动降级**：`sendVocal` 开启时，语音自动改为文件发送（无需改配置，图片卡片/二维码/文件均正常）
-- **原生卡片跳过**：weixin_oc 无 OneBot `send_api`，原生音乐卡片自动跳过
+- **原生卡片跳过**：weixin_oc 不是 OneBot 协议（无 `event.bot.call_action`），原生音乐卡片自动跳过
 
 ### Telegram / 钉钉 / 飞书 / KOOK / Discord
 
@@ -278,11 +283,14 @@ QQ 官方机器人接口与 OneBot 差异较大，插件做了专项适配：
 - **飞书**：`convert_audio_to_opus` 转 opus 发送
 - **KOOK**：上传资源后以 AUDIO 卡片发送
 - **Discord**：语音转 wav 作为附件发送
-- 五个平台均无 OneBot `send_api`，原生音乐卡片自动跳过
+- 五个平台均不是 OneBot 协议（无 `event.bot.call_action`），原生音乐卡片自动跳过
 
 ### aiocqhttp（OneBot）增强
 
-- 可选 `sendNativeCard`：发送 OneBot 原生音乐卡片（type=kugou），需协议端支持 `send_api`
+- 可选 `sendNativeCard`：通过 `event.bot.call_action` 直发 OneBot v11 `music` 段（type=kugou）原生音乐卡片，
+  需协议端支持该消息段（NapCat 等 OneBot v11 实现）；协议端不支持时静默跳过
+- **文件/语音直发**：跨容器（napcat 与 AstrBot 分处不同容器）时 `file://` 路径不可见，文件改以 `base64://` 内联直发；
+  无损/过大音频先用 ffmpeg 压成紧凑 mp3 控制载荷，语音以 `record` 段 base64 直发由协议端转 Tencent silk
 
 
 ---
@@ -291,7 +299,7 @@ QQ 官方机器人接口与 OneBot 差异较大，插件做了专项适配：
 
 ```text
 astrbot_plugin_kugoumusic/
-├── main.py                  # 插件生命周期入口与路由绑定（~50行）
+├── main.py                  # 插件生命周期入口与路由绑定
 ├── __init__.py              # 顶层包入口
 ├── metadata.yaml            # 插件元信息
 ├── _conf_schema.json        # 配置定义 Schema
@@ -299,22 +307,25 @@ astrbot_plugin_kugoumusic/
 ├── CHANGELOG.md             # 更新日志
 ├── requirements.txt         # Python 依赖
 ├── core/                    # 核心业务服务层
-│   ├── __init__.py          # 导出 MusicService
-│   ├── service.py           # 核心服务调度器（取链、卡片渲染、选歌会话调度、登录轮询生命周期）
-│   ├── api.py               # KuGouMusicApi 客户端封装
-│   ├── cards.py             # 会话与卡片数据构造
+│   ├── __init__.py          # 包说明（不在包级再导出，避免导入即拉整条依赖链）
+│   ├── service.py           # MusicService 服务门面（会话归属、配置写盘、卡片渲染、歌词解析；扫码轮询/状态卡/投递薄委托 login/panels/delivery）
+│   ├── api/                 # KuGouMusicApi 客户端包（_core + 按域端点模块）
+│   ├── help_data.py         # 帮助指令清单（纯数据表，卡片与文本共用）（含复用 HTTP 会话）
+│   ├── cards.py             # 会话存储（SessionStore）与卡片数据构造
 │   ├── delivery.py          # 音频下载与多平台分发
+│   ├── login.py             # 扫码登录：轮询骨架（PollSpec 参数化）、登录落盘、token 刷新
+│   ├── panels.py            # 状态卡 / 设置卡：数据构造与发送
 │   ├── quality.py           # 音质常量与标签映射
-│   ├── render.py            # Playwright HTML 渲染引擎
-│   └── tpl_adapter.py       # 模板适配器
+│   ├── render.py            # Playwright HTML 渲染引擎（常驻 Chromium 复用）
+│   └── messages.py          # 用户可见文案常量（多处复用文案集中定义）
 ├── handlers/                # 声明式指令路由层（按领域解耦）
 │   ├── __init__.py          # 聚合导出 ALL_ROUTES
 │   ├── base.py              # 声明式 Route 基类与 AstrBot 精准匹配安装器
-│   ├── play_cmds.py         # 播放类指令（点歌/听N/连播/播放）
-│   ├── explore_cmds.py      # 探索与榜单指令（排行/歌手/专辑/歌单/新歌/MV/电台等）
-│   ├── detail_cmds.py       # 详情与个人曲库指令（歌词/逐字歌词/评论/收藏/关注/云盘等）
-│   ├── auth_cmds.py         # 账号与登录指令（扫码登录/状态/登出）
-│   ├── system_cmds.py       # 系统与设置指令（帮助/设置/音质/API）
+│   ├── play_cmds.py         # 播放类指令（点歌/#kg听N/#kg听所有/直接播放）
+│   ├── explore_cmds.py      # 探索与榜单指令（排行/歌手/专辑/歌单/新碟/好歌/主题歌单/乐库/日推/FM 等）
+│   ├── detail_cmds.py       # 详情类指令（歌词/逐字歌词/评论/MV/高潮/AI 推荐/收藏/版本/歌单·专辑评论/评论数）
+│   ├── auth_cmds.py         # 账号与登录指令（扫码登录/QQ 扫码登录/状态/登出 + 个人曲库：我的歌单/最近/听歌排行/云盘/已购/等级/关注）
+│   ├── system_cmds.py       # 系统与设置指令（热搜/帮助/设置/音质/API/连通测试）
 │   └── share_cmds.py        # 链接与分享卡片解析（EventMessageType.ALL）
 └── resources/               # HTML/CSS 渲染卡片与静态资源
 ```
@@ -339,7 +350,7 @@ A：AstrBot ≥ 4.27.3 起 QQ 官方适配器支持大文件分片上传（`qqof
 A：确认 `enableResolve` 开启，且消息中含完整的酷狗歌曲链接（`kugou.com/song/#hash=...`）。插件指令消息不会被误解析。
 
 **Q：临时文件堆积？**
-A：默认 60 秒自动清理。如仍堆积，检查 `keepFileSec` 是否被设为过大值；设为 `0` 即时清理。
+A：默认 60 秒自动清理（延迟不低于 5 秒）。如仍堆积，检查 `keepFileSec` 是否被设为过大值。
 
 ---
 ## 📮 用户群

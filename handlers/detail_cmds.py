@@ -8,14 +8,10 @@ from astrbot.api.event import AstrMessageEvent
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core import api as kgapi
-    from ..core import cards as cardlib
-    from ..core.api import ApiError
-except ImportError:
-    from core import api as kgapi
-    from core import cards as cardlib
-    from core.api import ApiError
+from ..core import api as kgapi
+from ..core import cards as cardlib
+from ..core.api import ApiError
+from ..core.messages import NOT_FOUND, NOT_FOUND_ALBUM, NOT_FOUND_PLAYLIST
 from .base import Route
 
 
@@ -64,19 +60,21 @@ async def climax(service: MusicService, event: AstrMessageEvent):
     try:
         song = await service.resolve_song(kw)
         if not song:
-            await service.reply(event, f"没有搜到「{kw}」")
+            await service.reply(event, NOT_FOUND.format(kw))
             event.stop_event()
             return
         c = await kgapi.song_climax(song.get("hash") or "")
         if not c.get("start_ms"):
-            await service.reply(event, f"「{song['name']}」暂无高潮数据")
+            await service.reply(event, f"「{song.get('name') or ''}」暂无高潮数据")
             event.stop_event()
             return
-        fmt = lambda ms: f"{ms // 60000:02d}:{(ms % 60000) // 1000:02d}"
+        def fmt(ms: int) -> str:
+            return f"{ms // 60000:02d}:{(ms % 60000) // 1000:02d}"
+
         await service.reply(
             event,
             f"🎯 高潮片段：{fmt(c['start_ms'])} - {fmt(c['end_ms'])}（约 {c['duration_ms'] // 1000} 秒）\n"
-            f"♪ {song['name']} - {song['artist']}",
+            f"♪ {song.get('name') or ''} - {song.get('artist') or ''}",
         )
     except ApiError as err:
         service.log_warn(f"高潮失败: {err}")
@@ -93,7 +91,7 @@ async def ai_recommend_cmd(service: MusicService, event: AstrMessageEvent):
     try:
         song = await service.resolve_song(kw)
         if not song:
-            await service.reply(event, f"没有搜到「{kw}」")
+            await service.reply(event, NOT_FOUND.format(kw))
             event.stop_event()
             return
         mix = song.get("mixsongid") or song.get("id") or ""
@@ -102,7 +100,7 @@ async def ai_recommend_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无 AI 推荐歌曲")
             event.stop_event()
             return
-        await service.list_to_session(event, f"AI 推荐 · {song['name']}", songs)
+        await service.list_to_session(event, f"AI 推荐 · {song.get('name') or ''}", songs)
     except ApiError as err:
         service.log_warn(f"AI推荐失败: {err}")
         await service.reply(event, f"获取 AI 推荐失败：{err}")
@@ -136,10 +134,10 @@ async def playlist_comment(service: MusicService, event: AstrMessageEvent):
     try:
         p = await service.resolve_playlist(kw)
         if not p:
-            await service.reply(event, f"没有搜到歌单「{kw}」")
+            await service.reply(event, NOT_FOUND_PLAYLIST.format(kw))
             event.stop_event()
             return
-        comments = await kgapi.comment_playlist(p["id"])
+        comments = await kgapi.comment_playlist(p.get("id"))
         if not comments:
             await service.reply(event, "该歌单暂无评论")
             event.stop_event()
@@ -166,10 +164,10 @@ async def album_comment(service: MusicService, event: AstrMessageEvent):
     try:
         a = await service.resolve_album(kw)
         if not a:
-            await service.reply(event, f"没有搜到专辑「{kw}」")
+            await service.reply(event, NOT_FOUND_ALBUM.format(kw))
             event.stop_event()
             return
-        comments = await kgapi.comment_album(a["id"])
+        comments = await kgapi.comment_album(a.get("id"))
         if not comments:
             await service.reply(event, "该专辑暂无评论")
             event.stop_event()
@@ -196,13 +194,13 @@ async def comment_count_cmd(service: MusicService, event: AstrMessageEvent):
     try:
         song = await service.resolve_song(kw)
         if not song:
-            await service.reply(event, f"没有搜到「{kw}」")
+            await service.reply(event, NOT_FOUND.format(kw))
             event.stop_event()
             return
         cnt = await kgapi.comment_count(song.get("hash") or "")
         await service.reply(
             event,
-            f"💬 评论数：{cardlib.fmt_count(cnt) if cnt else '未知'}\n♪ {song['name']} - {song['artist']}",
+            f"💬 评论数：{cardlib.fmt_count(cnt) if cnt else '未知'}\n♪ {song.get('name') or ''} - {song.get('artist') or ''}",
         )
     except ApiError as err:
         service.log_warn(f"评论数失败: {err}")
@@ -276,5 +274,7 @@ ROUTES = [
         name="comment_count_cmd",
         doc="#kg评论数 关键词：歌曲评论数",
         run=comment_count_cmd,
+        # 必须高于 #kg评论（^…评论\s*(.*)$ 会把「数 关键词」吃成关键词并 stop_event）
+        priority=1,
     ),
 ]

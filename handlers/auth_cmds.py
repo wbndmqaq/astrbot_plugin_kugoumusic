@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import TYPE_CHECKING
 
@@ -10,14 +9,16 @@ from astrbot.api.message_components import Image
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core import api as kgapi
-    from ..core import cards as cardlib
-    from ..core.api import ApiError
-except ImportError:
-    from core import api as kgapi
-    from core import cards as cardlib
-    from core.api import ApiError
+from ..core import api as kgapi
+from ..core import cards as cardlib
+from ..core.api import ApiError
+from ..core.messages import (
+    NEED_LOGIN,
+    NEED_LOGIN_SUFFIX,
+    NOT_FOUND_SINGER,
+    QR_LOGIN_DISABLED,
+    TIP_FOLLOW_LIST,
+)
 from .base import Route
 
 
@@ -27,7 +28,7 @@ async def start_qr_login(service: MusicService, event: AstrMessageEvent):
     if not cfg.get("enable", True):
         return
     if cfg.get("qrLoginEnable") is False:
-        await service.reply(event, "扫码登录已在配置中关闭")
+        await service.reply(event, QR_LOGIN_DISABLED)
         event.stop_event()
         return
     user_key = service.user_key(event)
@@ -47,11 +48,12 @@ async def start_qr_login(service: MusicService, event: AstrMessageEvent):
         img_sent = False
         if qr_path:
             try:
-                await service.send_chain(event, Image.fromFileSystem(qr_path), service.plain(tip_text))
-                img_sent = True
+                img_sent = await service.send_chain(
+                    event, Image.fromFileSystem(qr_path), service.plain(tip_text)
+                )
             except Exception:
                 pass
-            asyncio.get_running_loop().call_later(120, lambda: service.safe_unlink(qr_path))
+            service.schedule_unlink(qr_path, 120)
         if not img_sent:
             await service.reply(event, tip_text + (f"\n或打开链接扫码：{qrurl}" if qrurl else ""))
         service.start_poll(event, key, 300)
@@ -66,14 +68,14 @@ async def start_qq_qr_login(service: MusicService, event: AstrMessageEvent):
     if not cfg.get("enable", True):
         return
     if cfg.get("qrLoginEnable") is False:
-        await service.reply(event, "扫码登录已在配置中关闭")
+        await service.reply(event, QR_LOGIN_DISABLED)
         event.stop_event()
         return
     user_key = service.user_key(event)
     service.stop_poll(user_key)
     try:
         await service.reply(event, "正在获取 QQ 登录二维码…")
-        info = await kgapi.login_qq_qr_create()
+        info = await kgapi.login_qq_qr_create() or {}
         qrimg = info.get("qrcode") or ""
         if not qrimg:
             await service.reply(event, "获取 QQ 二维码失败，请检查 API 服务")
@@ -84,11 +86,12 @@ async def start_qq_qr_login(service: MusicService, event: AstrMessageEvent):
         img_sent = False
         if qr_path:
             try:
-                await service.send_chain(event, Image.fromFileSystem(qr_path), service.plain(tip_text))
-                img_sent = True
+                img_sent = await service.send_chain(
+                    event, Image.fromFileSystem(qr_path), service.plain(tip_text)
+                )
             except Exception:
                 pass
-            asyncio.get_running_loop().call_later(120, lambda: service.safe_unlink(qr_path))
+            service.schedule_unlink(qr_path, 120)
         if not img_sent:
             await service.reply(event, tip_text)
         service.start_qq_poll(event, info, 180)
@@ -111,8 +114,14 @@ async def logout(service: MusicService, event: AstrMessageEvent):
         if service.plugin.config.get("defaultCookie"):
             service.plugin.config["defaultCookie"] = ""
             service.plugin.config["defaultUid"] = ""
-            service.plugin.config.save_config()
-            await service.reply(event, "已登出酷狗账号，并清除插件配置中的默认 Cookie")
+            if await service.save_config():
+                await service.reply(event, "已登出酷狗账号，并清除插件配置中的默认 Cookie")
+            else:
+                await service.reply(
+                    event,
+                    "⚠ 配置写入失败（本机 AstrBot 版本可能过旧）：本次运行的登录 Cookie 已清除，"
+                    "但重启后会恢复，请到 WebUI 插件配置中清空 defaultCookie，或升级 AstrBot",
+                )
         else:
             await service.reply(event, "当前未配置登录 Cookie")
     except Exception as err:
@@ -135,7 +144,7 @@ async def cloud(service: MusicService, event: AstrMessageEvent):
         await service.list_to_session(event, "我的云盘", songs[:20])
     except ApiError as err:
         service.log_warn(f"云盘失败: {err}")
-        await service.reply(event, f"获取云盘失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取云盘失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -151,17 +160,17 @@ async def purchased(service: MusicService, event: AstrMessageEvent):
         lines = []
         if songs:
             lines.append(f"已购单曲（{len(songs)}）:")
-            lines.extend(f"{i + 1}. {s['name']} - {s['artist']}" for i, s in enumerate(songs[:15]))
+            lines.extend(f"{i + 1}. {s.get('name') or ''} - {s.get('artist') or ''}" for i, s in enumerate(songs[:15]))
         if albums:
             lines.append(f"已购专辑（{len(albums)}）:")
-            lines.extend(f"{i + 1}. {a['name']} - {a['artist']}" for i, a in enumerate(albums[:10]))
+            lines.extend(f"{i + 1}. {a.get('name') or ''} - {a.get('artist') or ''}" for i, a in enumerate(albums[:10]))
         if not lines:
             await service.reply(event, "暂无已购内容")
         else:
             await service.reply(event, "🎵 已购内容\n" + "\n".join(lines))
     except ApiError as err:
         service.log_warn(f"已购失败: {err}")
-        await service.reply(event, f"获取已购失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取已购失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -177,18 +186,22 @@ async def grade(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无听歌等级数据")
             event.stop_event()
             return
-        hours = g["dSec"] / 3600
+        d_sec = g.get("dSec") or 0
+        hours = d_sec / 3600
+        current_point = g.get("currentPoint") or 0
         lines = [
-            f"🎧 听歌等级：Lv.{g['grade']}",
-            f"累计听歌时长：{hours:.1f} 小时（{g['dSec']} 秒）",
-            f"当前积分：{g['currentPoint']}",
+            f"🎧 听歌等级：Lv.{g.get('grade') or 0}",
+            f"累计听歌时长：{hours:.1f} 小时（{d_sec} 秒）",
+            f"当前积分：{current_point}",
         ]
         if g.get("nextGrade"):
-            lines.append(f"距 Lv.{g['nextGrade']} 还差 {max(0, g['nextGradePoint'] - g['currentPoint'])} 分")
+            lines.append(
+                f"距 Lv.{g.get('nextGrade')} 还差 {max(0, (g.get('nextGradePoint') or 0) - current_point)} 分"
+            )
         await service.reply(event, "\n".join(lines))
     except ApiError as err:
         service.log_warn(f"等级失败: {err}")
-        await service.reply(event, f"获取听歌等级失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取听歌等级失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -204,18 +217,18 @@ async def follow_toggle(service: MusicService, event: AstrMessageEvent):
     try:
         a = await service.resolve_artist(kw)
         if not a:
-            await service.reply(event, f"没有搜到歌手「{kw}」")
+            await service.reply(event, NOT_FOUND_SINGER.format(kw))
             event.stop_event()
             return
         if action in ("取关", "取消关注"):
-            await kgapi.artist_unfollow(a["id"])
-            await service.reply(event, f"已取消关注：{a['name']}")
+            await kgapi.artist_unfollow(a.get("id"))
+            await service.reply(event, f"已取消关注：{a.get('name') or ''}")
         else:
-            await kgapi.artist_follow(a["id"])
-            await service.reply(event, f"已关注：{a['name']}")
+            await kgapi.artist_follow(a.get("id"))
+            await service.reply(event, f"已关注：{a.get('name') or ''}")
     except ApiError as err:
         service.log_warn(f"关注操作失败: {err}")
-        await service.reply(event, f"操作失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"操作失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -234,7 +247,7 @@ async def follow_newsongs(service: MusicService, event: AstrMessageEvent):
         await service.list_to_session(event, "关注歌手新歌", songs[:20])
     except ApiError as err:
         service.log_warn(f"关注新歌失败: {err}")
-        await service.reply(event, f"获取关注新歌失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取关注新歌失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -250,26 +263,24 @@ async def follow_list(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无关注歌手")
             event.stop_event()
             return
+        # 同一份 rows 既喂卡片也喂文本兜底（原先列表推导写了两遍）
+        rows = [{"name": a.get("name") or "", "cover": a.get("cover") or ""} for a in artists]
         data = cardlib.build_generic_card_data(
             "我关注的歌手",
-            [{"name": a["name"], "cover": a.get("cover") or ""} for a in artists],
+            rows,
             subtitle=f"共 {len(artists)} 位",
-            tip="发送 #kg歌手 歌手名 查看热门歌曲；#kg取关 歌手名 取关",
+            tip=TIP_FOLLOW_LIST,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
             event,
             tpl_name="kg-generic",
             data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "我关注的歌手",
-                [{"name": a["name"]} for a in artists],
-                tip="发送 #kg歌手 歌手名 查看热门歌曲；#kg取关 歌手名 取关",
-            ),
+            format_text=lambda d: cardlib.format_generic_text("我关注的歌手", rows, tip=TIP_FOLLOW_LIST),
         )
     except ApiError as err:
         service.log_warn(f"关注列表失败: {err}")
-        await service.reply(event, f"获取关注列表失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取关注列表失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -279,7 +290,7 @@ async def my_playlist(service: MusicService, event: AstrMessageEvent):
         return
     uid = await service.get_uid()
     if not uid:
-        await service.reply(event, "需要登录后使用，请先 #kg登录")
+        await service.reply(event, NEED_LOGIN)
         event.stop_event()
         return
     try:
@@ -297,7 +308,7 @@ async def my_playlist(service: MusicService, event: AstrMessageEvent):
         )
     except ApiError as err:
         service.log_warn(f"我的歌单失败: {err}")
-        await service.reply(event, f"获取歌单失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取歌单失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -316,7 +327,7 @@ async def recent_song(service: MusicService, event: AstrMessageEvent):
         await service.list_to_session(event, "最近播放", songs[:20])
     except ApiError as err:
         service.log_warn(f"最近播放失败: {err}")
-        await service.reply(event, f"获取最近播放失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取最近播放失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 
@@ -335,7 +346,7 @@ async def user_history(service: MusicService, event: AstrMessageEvent):
         await service.list_to_session(event, "听歌排行", songs[:20])
     except ApiError as err:
         service.log_warn(f"听歌排行失败: {err}")
-        await service.reply(event, f"获取听歌排行失败：{err}\n需要先 #kg登录")
+        await service.reply(event, f"获取听歌排行失败：{err}{NEED_LOGIN_SUFFIX}")
     event.stop_event()
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import TYPE_CHECKING
@@ -9,19 +10,45 @@ from astrbot.api.event import AstrMessageEvent
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core import api as kgapi
-    from ..core import cards as cardlib
-    from ..core.api import ApiError
-    from ..core.quality import QUALITY_LABEL
-    from ..core.service import PLUGIN_DIR
-except ImportError:
-    from core import api as kgapi
-    from core import cards as cardlib
-    from core.api import ApiError
-    from core.quality import QUALITY_LABEL
-    from core.service import PLUGIN_DIR
+from ..core import api as kgapi
+from ..core import cards as cardlib
+from ..core import panels
+from ..core.api import ApiError
+from ..core.messages import CONFIG_SAVE_FAILED
+from ..core.quality import QUALITY_LABEL
+from ..core.service import PLUGIN_DIR
 from .base import Route
+
+# metadata.yaml 在进程内不会变，读一次即缓存（原先每次 #kg帮助 都同步读盘 + 解析 YAML）
+_VERSION_CACHE: str | None = None
+
+
+async def _plugin_version() -> str:
+    """读取插件版本号（进程内缓存，读盘走线程池，不在事件循环里同步 IO）。"""
+    global _VERSION_CACHE
+    if _VERSION_CACHE is not None:
+        return _VERSION_CACHE
+
+    def _read() -> str:
+        try:
+            import yaml
+
+            with open(
+                os.path.join(PLUGIN_DIR, "metadata.yaml"), "r", encoding="utf-8"
+            ) as f:
+                meta = yaml.safe_load(f) or {}
+            return str(meta.get("version", "?")).lstrip("v")
+        except Exception:
+            return "?"
+
+    _VERSION_CACHE = await asyncio.to_thread(_read)
+    return _VERSION_CACHE
+
+
+def _route_count() -> str:
+    """真实注册的路由条数（延迟导入避免与 handlers/__init__ 形成循环导入）。"""
+    from . import ALL_ROUTES
+    return str(len(ALL_ROUTES))
 
 
 async def hot_search(service: MusicService, event: AstrMessageEvent):
@@ -49,16 +76,8 @@ async def help_cmd(service: MusicService, event: AstrMessageEvent):
     if not service.cfg().get("enable", True):
         return
     try:
-        version = "?"
-        try:
-            import yaml
-
-            with open(os.path.join(PLUGIN_DIR, "metadata.yaml"), "r", encoding="utf-8") as f:
-                _meta = yaml.safe_load(f) or {}
-            version = str(_meta.get("version", "?")).lstrip("v")
-        except Exception:
-            pass
-        data = cardlib.build_help_card_data(version, service.cfg())
+        version = await _plugin_version()
+        data = cardlib.build_help_card_data(version, service.cfg(), stat_commands=_route_count())
         await service.reply_card_or_text(
             event,
             tpl_name="kg-help",
@@ -73,12 +92,8 @@ async def help_cmd(service: MusicService, event: AstrMessageEvent):
 
 async def settings(service: MusicService, event: AstrMessageEvent):
     """#kg设置：查看插件设置"""
-    cfg = service.cfg()
-    try:
-        uid = await service.get_uid()
-    except Exception:
-        uid = ""
-    data = cardlib.build_settings_card_data(cfg, uid)
+    # 面板数据（含 uid 读取的异常兜底）由 core/panels.py 统一构造
+    cfg, uid, data = await panels.build_settings_panel(service)
     await service.reply_card_or_text(
         event,
         tpl_name="kg-settings",
@@ -89,7 +104,7 @@ async def settings(service: MusicService, event: AstrMessageEvent):
 
 
 async def quality_cmd(service: MusicService, event: AstrMessageEvent):
-    """#kg音质 <档位>：修改音质（auto/flac/320/128）"""
+    """#kg音质 <档位>：修改音质（auto/viper_tape/viper_clear/super/high/flac/320/128）"""
     m = re.match(r"^#?(?:kg|KG)\s*音质\s*(.+)$", event.message_str.strip(), re.IGNORECASE)
     q = (m.group(1).strip().lower() if m else "").strip()
     if q not in QUALITY_LABEL:
@@ -97,7 +112,13 @@ async def quality_cmd(service: MusicService, event: AstrMessageEvent):
         event.stop_event()
         return
     service.plugin.config["quality"] = q
-    service.plugin.config.save_config()
+    if not await service.save_config():
+        await service.reply(
+            event,
+            CONFIG_SAVE_FAILED,
+        )
+        event.stop_event()
+        return
     await service.reply(event, f"已设置音质：{QUALITY_LABEL.get(q, q)}")
     event.stop_event()
 
@@ -107,7 +128,13 @@ async def api_cmd(service: MusicService, event: AstrMessageEvent):
     m = re.match(r"^#?(?:kg|KG)\s*api\s*(https?://\S+)$", event.message_str.strip(), re.IGNORECASE)
     url = m.group(1).strip().rstrip("/") if m else ""
     service.plugin.config["apiBase"] = url
-    service.plugin.config.save_config()
+    if not await service.save_config():
+        await service.reply(
+            event,
+            CONFIG_SAVE_FAILED,
+        )
+        event.stop_event()
+        return
     await service.reply(event, f"已设置 API 地址：{url}")
     event.stop_event()
 
@@ -121,7 +148,7 @@ async def api_test(service: MusicService, event: AstrMessageEvent):
         event.stop_event()
         return
     try:
-        lst = await kgapi.search("测试", pagesize=1)
+        lst = await kgapi.search("测试", pagesize=1) or []
         masked = cardlib.mask_api_base(base)
         await service.reply(event, f"✅ API 连通正常：{masked}\n搜索结果 {len(lst)} 条")
     except ApiError as e:
@@ -153,7 +180,7 @@ ROUTES = [
     Route(
         pattern=re.compile(r"^#?(?:kg|KG)\s*音质\s*(.+)$", re.IGNORECASE),
         name="quality_cmd",
-        doc="#kg音质 <档位>：修改音质（auto/flac/320/128）",
+        doc="#kg音质 <档位>：修改音质（auto/viper_tape/viper_clear/super/high/flac/320/128）",
         run=quality_cmd,
         admin=True,
         priority=6,

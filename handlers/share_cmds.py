@@ -7,10 +7,11 @@ from astrbot.api.event import AstrMessageEvent, filter
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core.service import collect_message_text, is_kg_message, is_plugin_command_msg
-except ImportError:
-    from core.service import collect_message_text, is_kg_message, is_plugin_command_msg
+from ..core.service import (
+    collect_message_text,
+    is_kg_message,
+    is_plugin_command_msg,
+)
 from .base import Route
 
 
@@ -24,10 +25,14 @@ async def resolve(service: MusicService, event: AstrMessageEvent):
     if not cfg.get("enable", True) or cfg.get("enableResolve") is False:
         return
     msg_str = str(event.message_str or "")
-    chain = getattr(getattr(event, "message_obj", None), "message", None) or []
-    has_json = any(type(seg).__name__ == "Json" for seg in chain)
-    if not has_json and not is_kg_message(msg_str):
-        return
+    low = msg_str.lower()
+    # 便宜的前置子串判断：不含酷狗域名的消息直接返回，避免每条群消息都走正则
+    # 与消息采集。OneBot 分享卡片的 URL 在 Json 段里（message_str 为空），
+    # 因此无域名时还需确认消息链中确实没有 Json 段。
+    if "kugou.com" not in low and "kugou.net" not in low:
+        chain = getattr(getattr(event, "message_obj", None), "message", None) or []
+        if not any(type(seg).__name__ == "Json" for seg in chain):
+            return
     text = collect_message_text(event)
     if not is_kg_message(text):
         return

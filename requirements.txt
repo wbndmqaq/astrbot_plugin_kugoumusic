@@ -1,4 +1,8 @@
 aiohttp>=3.9.0
 jinja2>=3.0.0
-# 本地 HTML→图片 卡片渲染（部署后需执行: playwright install chromium）
+PyYAML>=6.0
+# 卡片渲染用；缺失时自动回退纯文本，点歌播放不受影响
+# 注意：pip 会安装本文件里的每一行，所以它并不是「装不装都行」——真正可选的是
+# Chromium 内核。若不需要图片卡片，可执行 playwright uninstall chromium 释放空间
+# （部署后需执行: playwright install chromium）
 playwright>=1.40.0

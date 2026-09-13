@@ -9,18 +9,12 @@ from astrbot.api.event import AstrMessageEvent
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core import api as kgapi
-    from ..core import cards as cardlib
-    from ..core.api import ApiError
-    from ..core.delivery import deliver_song
-    from ..core.service import PLAY_ALL_LIMIT, PLUGIN_DIR
-except ImportError:
-    from core import api as kgapi
-    from core import cards as cardlib
-    from core.api import ApiError
-    from core.delivery import deliver_song
-    from core.service import PLAY_ALL_LIMIT, PLUGIN_DIR
+from ..core import api as kgapi
+from ..core import cards as cardlib
+from ..core.api import ApiError, cfg_int
+from ..core.delivery import deliver_song
+from ..core.messages import INDEX_OUT_OF_RANGE, NOT_FOUND
+from ..core.service import PLAY_ALL_LIMIT
 from .base import Route
 
 
@@ -36,7 +30,7 @@ async def pick_song(service: MusicService, event: AstrMessageEvent):
         return
     try:
         await service.reply(event, f"正在搜索：{keyword}")
-        page_size = min(int(service.cfg().get("maxList") or 10), 20)
+        page_size = max(1, min(cfg_int(service.cfg(), "maxList", 10), 20))
         lst = await kgapi.search(keyword, "song", pagesize=page_size)
         if not lst:
             await service.reply(event, "没有搜到相关歌曲")
@@ -68,7 +62,7 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
         return
     songs = session.get("data") or []
     if n < 1 or n > len(songs):
-        await service.reply(event, f"序号超出范围（1-{len(songs)}）")
+        await service.reply(event, INDEX_OUT_OF_RANGE.format(len(songs)))
         event.stop_event()
         return
     song = songs[n - 1]
@@ -134,21 +128,29 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
                 service.log_warn(f"连播 {i + 1}/{len(batch)} 无播放链: {song.get('name')}")
                 continue
             # 连播不发详情卡/文案/音乐卡，只发语音+文件
-            await deliver_song(
+            res = await deliver_song(
                 service.plugin,
                 event,
                 song,
                 play,
                 cfg=cfg,
-                plugin_dir=PLUGIN_DIR,
                 options={"skipTextInfo": True, "skipNativeCard": True},
             )
-            service.report_play_history(song)
-            ok += 1
+            # 投递层会如实返回「语音/文件两条通道是否真的发出」；不看返回值会让
+            # 「连播完成：成功 N 首」把没发出去的歌也计成成功。
+            if res.get("ok"):
+                ok += 1
+                service.report_play_history(song)
+            else:
+                fail += 1
+                service.log_warn(
+                    f"连播 {i + 1}/{len(batch)} 投递失败: {song.get('name')}"
+                    f"（{res.get('reason') or '投递未成功'}）"
+                )
         except ApiError as err:
             fail += 1
             service.log_warn(f"连播 {i + 1}/{len(batch)} 失败: {err}")
-        except Exception as err:  # noqa: BLE001  # 单曲失败不中断连播
+        except Exception as err:  # 单曲失败不中断连播
             fail += 1
             service.log_warn(f"连播 {i + 1}/{len(batch)} 失败: {type(err).__name__}: {err}")
         if i < len(batch) - 1:
@@ -170,7 +172,7 @@ async def play_direct(service: MusicService, event: AstrMessageEvent):
     try:
         lst = await kgapi.search(keyword, "song", pagesize=1)
         if not lst:
-            await service.reply(event, f"没有搜到「{keyword}」")
+            await service.reply(event, NOT_FOUND.format(keyword))
             event.stop_event()
             return
         await service.play_song(event, lst[0], source="搜索")

@@ -8,16 +8,23 @@ from astrbot.api.event import AstrMessageEvent
 if TYPE_CHECKING:
     from ..core.service import MusicService
 
-try:
-    from ..core import api as kgapi
-    from ..core import cards as cardlib
-    from ..core.api import ApiError
-    from ..core.service import ARTIST_LIST_TYPES, GOOD_SONG_CARDS, NEW_ALBUM_AREAS
-except ImportError:
-    from core import api as kgapi
-    from core import cards as cardlib
-    from core.api import ApiError
-    from core.service import ARTIST_LIST_TYPES, GOOD_SONG_CARDS, NEW_ALBUM_AREAS
+from ..core import api as kgapi
+from ..core import cards as cardlib
+from ..core.api import ApiError
+from ..core.messages import (
+    INDEX_OUT_OF_RANGE,
+    NOT_FOUND_ALBUM,
+    NOT_FOUND_PLAYLIST,
+    NOT_FOUND_SINGER,
+    TIP_ALBUM_TRACKS,
+    TIP_HISTORY,
+    TIP_RANK_BY_NAME,
+    TIP_RANK_LIST,
+    TIP_SINGER_HOT,
+    TIP_THEME_PLAYLIST,
+    TIP_YUEKU,
+)
+from ..core.service import ARTIST_LIST_TYPES, GOOD_SONG_CARDS, NEW_ALBUM_AREAS
 from .base import Route
 
 
@@ -37,28 +44,25 @@ async def chart(service: MusicService, event: AstrMessageEvent):
             # 榜单太多，展示前 30 个，完整列表仍支持名称匹配
             shown = tops[:30]
             items = [
-                {"name": t["name"], "sub": f"更新 {t.get('update')}s" if t.get("update") else ""} for t in shown
+                {"name": t.get("name") or "", "sub": f"更新 {t.get('update')}s" if t.get("update") else ""}
+                for t in shown
             ]
-            data = cardlib.build_generic_card_data(
+            data, format_text = _generic_panel(
                 "酷狗排行榜",
                 items,
                 subtitle=f"共 {len(tops)} 个榜单，显示前 {len(shown)} 个",
-                tip="发送 #kg排行 榜单名 查看（如 #kg排行 TOP500）",
+                tip=TIP_RANK_LIST,
                 cfg=service.cfg(),
             )
             await service.reply_card_or_text(
-                event,
-                tpl_name="kg-generic",
-                data=data,
-                format_text=lambda d: cardlib.format_generic_text(
-                    "酷狗排行榜", items, tip="发送 #kg排行 榜单名 查看（如 #kg排行 TOP500）"
-                ),
+                event, tpl_name="kg-generic", data=data, format_text=format_text
             )
             event.stop_event()
             return
         target = None
         for t in tops:
-            if name == str(t["id"]) or name in t["name"] or t["name"] in name:
+            t_name = str(t.get("name") or "")
+            if name == str(t.get("id") or "") or (t_name and (name in t_name or t_name in name)):
                 target = t
                 break
         if not target:
@@ -67,10 +71,10 @@ async def chart(service: MusicService, event: AstrMessageEvent):
             return
         songs = await kgapi.rank_audio(target["id"], pagesize=60)
         if not songs:
-            await service.reply(event, f"榜单「{target['name']}」暂无数据")
+            await service.reply(event, f"榜单「{target.get('name') or ''}」暂无数据")
             event.stop_event()
             return
-        await service.list_to_session(event, f"排行榜 · {target['name']}", songs)
+        await service.list_to_session(event, f"排行榜 · {target.get('name') or ''}", songs)
     except ApiError as err:
         service.log_warn(f"排行失败: {err}")
         await service.reply(event, f"获取排行榜失败：{err}")
@@ -86,15 +90,15 @@ async def artist(service: MusicService, event: AstrMessageEvent):
     try:
         a = await service.resolve_artist(kw)
         if not a:
-            await service.reply(event, f"没有搜到歌手「{kw}」")
+            await service.reply(event, NOT_FOUND_SINGER.format(kw))
             event.stop_event()
             return
-        songs = await kgapi.artist_audios(a["id"], sort="hot", pagesize=30)
+        songs = await kgapi.artist_audios(a.get("id"), sort="hot", pagesize=30)
         if not songs:
-            await service.reply(event, f"歌手「{a['name']}」暂无热门歌曲")
+            await service.reply(event, f"歌手「{a.get('name') or ''}」暂无热门歌曲")
             event.stop_event()
             return
-        await service.list_to_session(event, f"歌手 · {a['name']}", songs)
+        await service.list_to_session(event, f"歌手 · {a.get('name') or ''}", songs)
     except ApiError as err:
         service.log_warn(f"歌手失败: {err}")
         await service.reply(event, f"获取歌手歌曲失败：{err}")
@@ -110,16 +114,16 @@ async def album(service: MusicService, event: AstrMessageEvent):
     try:
         a = await service.resolve_album(kw)
         if not a:
-            await service.reply(event, f"没有搜到专辑「{kw}」")
+            await service.reply(event, NOT_FOUND_ALBUM.format(kw))
             event.stop_event()
             return
-        songs = await kgapi.album_songs(a["id"], pagesize=30)
+        songs = await kgapi.album_songs(a.get("id"), pagesize=30)
         if not songs:
-            await service.reply(event, f"专辑「{a['name']}」暂无曲目")
+            await service.reply(event, f"专辑「{a.get('name') or ''}」暂无曲目")
             event.stop_event()
             return
         await service.list_to_session(
-            event, f"专辑 · {a['name']}", songs, tip=f"歌手：{a.get('artist') or ''} · 共 {len(songs)} 首"
+            event, f"专辑 · {a.get('name') or ''}", songs, tip=f"歌手：{a.get('artist') or ''} · 共 {len(songs)} 首"
         )
     except ApiError as err:
         service.log_warn(f"专辑失败: {err}")
@@ -136,24 +140,24 @@ async def playlist(service: MusicService, event: AstrMessageEvent):
     try:
         p = await service.resolve_playlist(kw)
         if not p:
-            await service.reply(event, f"没有搜到歌单「{kw}」")
+            await service.reply(event, NOT_FOUND_PLAYLIST.format(kw))
             event.stop_event()
             return
         try:
-            songs = await kgapi.playlist_tracks(p["id"], pagesize=100)
+            songs = await kgapi.playlist_tracks(p.get("id"), pagesize=100)
         except ApiError as e:
             if e.code in (20010, 20017):
-                await service.reply(event, f"获取歌单「{p['name'] or kw}」曲目需要登录：{e}")
+                await service.reply(event, f"获取歌单「{p.get('name') or kw}」曲目需要登录：{e}")
                 event.stop_event()
                 return
             raise
         if not songs:
-            await service.reply(event, f"歌单「{p['name'] or kw}」暂无曲目或需要登录")
+            await service.reply(event, f"歌单「{p.get('name') or kw}」暂无曲目或需要登录")
             event.stop_event()
             return
         shown = songs[:30]
         await service.list_to_session(
-            event, f"歌单 · {p['name']}", shown, tip=f"歌单共 {len(songs)} 首，显示前 {len(shown)} 首"
+            event, f"歌单 · {p.get('name') or ''}", shown, tip=f"歌单共 {len(songs)} 首，显示前 {len(shown)} 首"
         )
     except ApiError as err:
         service.log_warn(f"歌单失败: {err}")
@@ -211,26 +215,15 @@ async def catlist(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无歌单分类数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
-            "歌单分类",
-            [
-                {"name": c["name"], "tag": f"{cardlib.fmt_count(c['count'])}" if c.get("count") else ""}
-                for c in cats[:40]
-            ],
-            subtitle="歌单标签分类",
-            cfg=service.cfg(),
+        items = [
+            {"name": c.get("name") or "", "tag": f"{cardlib.fmt_count(c.get('count'))}" if c.get("count") else ""}
+            for c in cats[:40]
+        ]
+        data, format_text = _generic_panel(
+            "歌单分类", items, subtitle="歌单标签分类", cfg=service.cfg()
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "歌单分类",
-                [
-                    {"name": c["name"], "tag": f"{cardlib.fmt_count(c['count'])}" if c.get("count") else ""}
-                    for c in cats[:40]
-                ],
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"歌单分类失败: {err}")
@@ -249,19 +242,12 @@ async def suggest(service: MusicService, event: AstrMessageEvent):
         if not items:
             await service.reply(event, "暂无补全建议")
         else:
-            data = cardlib.build_generic_card_data(
-                f"「{kw}」的搜索建议",
-                [{"name": w} for w in items],
-                subtitle="关键词补全",
-                cfg=service.cfg(),
+            rows = [{"name": w} for w in items]
+            data, format_text = _generic_panel(
+                f"「{kw}」的搜索建议", rows, subtitle="关键词补全", cfg=service.cfg()
             )
             await service.reply_card_or_text(
-                event,
-                tpl_name="kg-generic",
-                data=data,
-                format_text=lambda d: cardlib.format_generic_text(
-                    f"「{kw}」的搜索建议", [{"name": w} for w in items]
-                ),
+                event, tpl_name="kg-generic", data=data, format_text=format_text
             )
     except ApiError as err:
         service.log_warn(f"搜索建议失败: {err}")
@@ -282,30 +268,27 @@ async def new_album(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无新碟数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
+        rows = [
+            {
+                "name": a.get("name") or "",
+                "sub": a.get("artist") or "",
+                "tag": a.get("publishDate") or "",
+                "cover": a.get("cover") or "",
+            }
+            for a in albums
+        ]
+        # 文本兜底只展示 名称+歌手（不显示上架日期），按同一份 albums 投影一遍
+        text_rows = [{"name": a.get("name") or "", "sub": a.get("artist") or ""} for a in albums]
+        data, format_text = _generic_panel(
             f"新碟上架 · {area or '推荐'}",
-            [
-                {
-                    "name": a["name"],
-                    "sub": a.get("artist") or "",
-                    "tag": a.get("publishDate") or "",
-                    "cover": a.get("cover") or "",
-                }
-                for a in albums
-            ],
+            rows,
             subtitle="最新专辑",
-            tip="发送 #kg专辑 专辑名 查看曲目",
+            tip=TIP_ALBUM_TRACKS,
             cfg=service.cfg(),
+            text_rows=text_rows,
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                f"新碟上架 · {area or '推荐'}",
-                [{"name": a["name"], "sub": a.get("artist") or ""} for a in albums],
-                tip="发送 #kg专辑 专辑名 查看曲目",
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"新碟失败: {err}")
@@ -340,22 +323,22 @@ async def theme_playlist_cmd(service: MusicService, event: AstrMessageEvent):
         return
     arg = m.group(1).strip()
     scope = service.scope(event)
-    session = await cardlib.SessionStore.get(service.plugin, scope)
+    session = await cardlib.SessionStore.get(service.plugin, scope, kind="theme")
     try:
         if re.fullmatch(r"\d+", arg) and session and session.get("type") == "kg_theme":
             n = int(arg)
             themes = session.get("data") or []
             if n < 1 or n > len(themes):
-                await service.reply(event, f"序号超出范围（1-{len(themes)}）")
+                await service.reply(event, INDEX_OUT_OF_RANGE.format(len(themes)))
                 event.stop_event()
                 return
             theme = themes[n - 1]
-            songs = await kgapi.theme_playlist_tracks(theme["id"], pagesize=30)
+            songs = await kgapi.theme_playlist_tracks(theme.get("id"), pagesize=30)
             if not songs:
-                await service.reply(event, f"主题「{theme['name']}」暂无曲目")
+                await service.reply(event, f"主题「{theme.get('name') or ''}」暂无曲目")
                 event.stop_event()
                 return
-            await service.list_to_session(event, f"主题 · {theme['name']}", songs)
+            await service.list_to_session(event, f"主题 · {theme.get('name') or ''}", songs)
             event.stop_event()
             return
         themes = await kgapi.theme_playlists(pagesize=20)
@@ -363,23 +346,17 @@ async def theme_playlist_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无主题歌单")
             event.stop_event()
             return
-        await cardlib.SessionStore.set(service.plugin, scope, {"type": "kg_theme", "data": themes})
-        data = cardlib.build_generic_card_data(
+        await cardlib.SessionStore.set(service.plugin, scope, {"type": "kg_theme", "data": themes}, kind="theme")
+        rows = [{"name": t.get("name") or "", "sub": t.get("intro") or "", "cover": t.get("cover") or ""} for t in themes]
+        data, format_text = _generic_panel(
             "主题歌单",
-            [{"name": t["name"], "sub": t.get("intro") or "", "cover": t.get("cover") or ""} for t in themes],
+            rows,
             subtitle=f"共 {len(themes)} 个主题",
-            tip="发送 #kg主题歌单 序号 查看曲目（如 #kg主题歌单 1）",
+            tip=TIP_THEME_PLAYLIST,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "主题歌单",
-                [{"name": t["name"], "sub": t.get("intro") or ""} for t in themes],
-                tip="发送 #kg主题歌单 序号 查看曲目（如 #kg主题歌单 1）",
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"主题歌单失败: {err}")
@@ -392,7 +369,7 @@ async def yueku_cmd(service: MusicService, event: AstrMessageEvent):
     if not service.cfg().get("enable", True):
         return
     try:
-        info = await kgapi.yueku()
+        info = await kgapi.yueku() or {}
         sections = info.get("sections") or {}
         labels = {
             "recommend": "推荐",
@@ -407,20 +384,15 @@ async def yueku_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无乐库数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
+        data, format_text = _generic_panel(
             "酷狗乐库",
             items,
             subtitle="乐库各区块",
-            tip="发送 #kg好歌 / #kg新碟 / #kg排行 查看对应内容",
+            tip=TIP_YUEKU,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "酷狗乐库", items, tip="发送 #kg好歌 / #kg新碟 / #kg排行 查看对应内容"
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"乐库失败: {err}")
@@ -438,17 +410,18 @@ async def top_ip_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无编辑精选数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
+        rows = [{"name": it.get("name") or "", "sub": it.get("sub") or "", "cover": it.get("cover") or ""} for it in items]
+        # 文本兜底只展示名称，按同一份 items 投影一遍
+        text_rows = [{"name": it.get("name") or ""} for it in items]
+        data, format_text = _generic_panel(
             "编辑精选",
-            [{"name": it["name"], "sub": it.get("sub") or "", "cover": it.get("cover") or ""} for it in items],
+            rows,
             subtitle="编辑精选专题",
             cfg=service.cfg(),
+            text_rows=text_rows,
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text("编辑精选", [{"name": it["name"]} for it in items]),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"编辑精选失败: {err}")
@@ -466,20 +439,16 @@ async def rank_top_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无排行推荐数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
+        rows = [{"name": it.get("name") or "", "cover": it.get("cover") or ""} for it in items]
+        data, format_text = _generic_panel(
             "推荐排行榜",
-            [{"name": it["name"], "cover": it.get("cover") or ""} for it in items],
+            rows,
             subtitle="精选榜单",
-            tip="发送 #kg排行 榜单名 查看歌曲",
+            tip=TIP_RANK_BY_NAME,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "推荐排行榜", [{"name": it["name"]} for it in items], tip="发送 #kg排行 榜单名 查看歌曲"
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"排行推荐失败: {err}")
@@ -494,17 +463,17 @@ async def history_daily(service: MusicService, event: AstrMessageEvent):
         return
     arg = m.group(1).strip()
     scope = service.scope(event)
-    session = await cardlib.SessionStore.get(service.plugin, scope)
+    session = await cardlib.SessionStore.get(service.plugin, scope, kind="history")
     try:
         if re.fullmatch(r"\d+", arg) and session and session.get("type") == "kg_history":
             n = int(arg)
             groups = session.get("data") or []
             if n < 1 or n > len(groups):
-                await service.reply(event, f"序号超出范围（1-{len(groups)}）")
+                await service.reply(event, INDEX_OUT_OF_RANGE.format(len(groups)))
                 event.stop_event()
                 return
             group = groups[n - 1]
-            await service.list_to_session(event, f"历史日推 · {group['name']}", group["songs"])
+            await service.list_to_session(event, f"历史日推 · {group.get('name') or ''}", group.get("songs") or [])
             event.stop_event()
             return
         groups = await kgapi.everyday_history()
@@ -512,23 +481,17 @@ async def history_daily(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无历史推荐记录")
             event.stop_event()
             return
-        await cardlib.SessionStore.set(service.plugin, scope, {"type": "kg_history", "data": groups})
-        data = cardlib.build_generic_card_data(
+        await cardlib.SessionStore.set(service.plugin, scope, {"type": "kg_history", "data": groups}, kind="history")
+        rows = [{"name": g.get("name") or "", "tag": f"{g.get('count')} 首"} for g in groups]
+        data, format_text = _generic_panel(
             "历史每日推荐",
-            [{"name": g["name"], "tag": f"{g['count']} 首"} for g in groups],
+            rows,
             subtitle=f"共 {len(groups)} 期",
-            tip="发送 #kg历史日推 序号 查看（如 #kg历史日推 1）",
+            tip=TIP_HISTORY,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                "历史每日推荐",
-                [{"name": g["name"], "tag": f"{g['count']} 首"} for g in groups],
-                tip="发送 #kg历史日推 序号 查看（如 #kg历史日推 1）",
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"历史日推失败: {err}")
@@ -545,33 +508,27 @@ async def artist_albums_cmd(service: MusicService, event: AstrMessageEvent):
     try:
         a = await service.resolve_artist(kw)
         if not a:
-            await service.reply(event, f"没有搜到歌手「{kw}」")
+            await service.reply(event, NOT_FOUND_SINGER.format(kw))
             event.stop_event()
             return
-        albums = await kgapi.artist_albums(a["id"], pagesize=15)
+        albums = await kgapi.artist_albums(a.get("id"), pagesize=15)
         if not albums:
-            await service.reply(event, f"歌手「{a['name']}」暂无专辑")
+            await service.reply(event, f"歌手「{a.get('name') or ''}」暂无专辑")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
-            f"专辑 · {a['name']}",
-            [
-                {"name": al["name"], "sub": al.get("publishDate") or "", "cover": al.get("cover") or ""}
-                for al in albums
-            ],
+        rows = [
+            {"name": al.get("name") or "", "sub": al.get("publishDate") or "", "cover": al.get("cover") or ""}
+            for al in albums
+        ]
+        data, format_text = _generic_panel(
+            f"专辑 · {a.get('name') or ''}",
+            rows,
             subtitle=f"共 {len(albums)} 张专辑",
-            tip="发送 #kg专辑 专辑名 查看曲目",
+            tip=TIP_ALBUM_TRACKS,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                f"专辑 · {a['name']}",
-                [{"name": al["name"], "sub": al.get("publishDate") or ""} for al in albums],
-                tip="发送 #kg专辑 专辑名 查看曲目",
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"歌手专辑失败: {err}")
@@ -592,22 +549,16 @@ async def artist_list_cmd(service: MusicService, event: AstrMessageEvent):
             await service.reply(event, "暂无歌手数据")
             event.stop_event()
             return
-        data = cardlib.build_generic_card_data(
+        rows = [{"name": a.get("name") or "", "cover": a.get("cover") or ""} for a in artists]
+        data, format_text = _generic_panel(
             f"歌手列表 · {t or '全部'}",
-            [{"name": a["name"], "cover": a.get("cover") or ""} for a in artists],
+            rows,
             subtitle=f"共 {len(artists)} 位歌手",
-            tip="发送 #kg歌手 歌手名 查看热门歌曲",
+            tip=TIP_SINGER_HOT,
             cfg=service.cfg(),
         )
         await service.reply_card_or_text(
-            event,
-            tpl_name="kg-generic",
-            data=data,
-            format_text=lambda d: cardlib.format_generic_text(
-                f"歌手列表 · {t or '全部'}",
-                [{"name": a["name"]} for a in artists],
-                tip="发送 #kg歌手 歌手名 查看热门歌曲",
-            ),
+            event, tpl_name="kg-generic", data=data, format_text=format_text
         )
     except ApiError as err:
         service.log_warn(f"歌手列表失败: {err}")
@@ -639,7 +590,11 @@ async def random_song(service: MusicService, event: AstrMessageEvent):
     try:
         try:
             songs = await kgapi.personal_fm()
-        except ApiError:
+        except ApiError as e:
+            # 总超时（20 秒没回）不退回日推再等一轮：两档都是完整 API 调用，
+            # 逐档重试只会把一次超时放大成两次
+            if e.timeout:
+                raise
             songs = await kgapi.everyday_recommend()
         if not songs:
             await service.reply(event, "没有拿到推荐歌曲，请稍后再试")
@@ -669,6 +624,24 @@ async def fm(service: MusicService, event: AstrMessageEvent):
         service.log_warn(f"FM 失败: {err}")
         await service.reply(event, f"获取 FM 失败：{err}\n可能需要 #kg登录")
     event.stop_event()
+
+
+def _generic_panel(title, rows, *, subtitle: str = "", tip: str = "", cfg: dict | None = None, text_rows: list | None = None):
+    """构造 (kg-generic 卡片数据, 文本兜底回调)，供 explore 各指令统一使用。
+
+    原先每个指令把「卡片 items 列表推导」与「文本兜底 lambda 里的同一份推导」各写
+    一遍（10+ 处）；这里只构造一次 rows，卡片与文本兜底共用同一份数据。
+
+    ``format_generic_text`` 只读 name/main/sub/tag，因此除个别「文本只展示部分字段」
+    的指令（用 ``text_rows`` 显式投影）外，文本兜底可直接消费 ``rows``。
+    """
+    data = cardlib.build_generic_card_data(title, rows, subtitle=subtitle, tip=tip, cfg=cfg)
+    fallback_rows = rows if text_rows is None else text_rows
+
+    def _format_text(_data):
+        return cardlib.format_generic_text(title, fallback_rows, tip=tip)
+
+    return data, _format_text
 
 
 ROUTES = [
@@ -755,6 +728,8 @@ ROUTES = [
         name="rank_top_cmd",
         doc="#kg排行推荐：推荐的排行榜",
         run=rank_top_cmd,
+        # 必须高于 #kg排行（^…排行\s*(.*)$ 会把「推荐」吃成榜名并 stop_event）
+        priority=1,
     ),
     Route(
         pattern=re.compile(r"^#?(?:kg|KG)\s*历史日推\s*(.*)$", re.IGNORECASE),
