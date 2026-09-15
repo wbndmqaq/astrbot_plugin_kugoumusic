@@ -221,9 +221,15 @@ class MusicService:
         # 听歌历史等）可能正拿着已关闭的会话发请求而报错。
         for user_key in list(self.active_logins.keys()):
             self.stop_poll(user_key)
-        # 取消所有 fire-and-forget 后台任务（上报听歌历史、刷新 token 等）
-        for t in list(self._bg_tasks):
+        # 取消所有 fire-and-forget 后台任务（上报听歌历史、刷新 token 等），
+        # 并等待其退出后再关会话——cancel() 只是发出请求，被取消的任务可能正拿
+        # 着 aiohttp 会话在 await 中，不等它落定就 close_session() 会留下
+        # 「会话已关闭仍被引用」的窗口报错（与 neteasemusic 同口径）。
+        tasks = list(self._bg_tasks)
+        for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         # 取消待执行的临时文件清理定时器，并 best-effort 删除其登记的残留文件
         # （只 cancel 不删会让已排期的音频/卡片图永久留在 tempDir，重载越频繁残留越多；
         # cancel_cleanups 内部带 5 秒宽限期，不会误删「已登记、发送方仍在读盘」的文件）

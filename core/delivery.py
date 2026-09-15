@@ -250,10 +250,11 @@ async def download_audio(
 
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
     size = 0
-    # 确保目标文件不存在（时间戳通常唯一，此处双保险避免 ab 追加到残留文件）
-    if os.path.exists(file_path):
+    # 确保目标文件不存在（时间戳通常唯一，此处双保险避免 ab 追加到残留文件）；
+    # stat/remove 是阻塞 IO，丢线程池执行（与本函数其余落盘路径同口径）
+    if await asyncio.to_thread(os.path.exists, file_path):
         try:
-            os.remove(file_path)
+            await asyncio.to_thread(os.remove, file_path)
         except Exception:
             pass
     try:

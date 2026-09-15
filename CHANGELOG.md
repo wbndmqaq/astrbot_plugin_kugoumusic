@@ -1,5 +1,12 @@
 # 更新日志
 
+## v2.0.3 (2026-09-15)
+
+### 🐛 缺陷修复
+
+- **卸载时后台任务未等待收尾**：`terminate()` 取消 `_bg_tasks` 后直接关闭 aiohttp 会话，任务收尾阶段仍可能引用已关闭的会话（Windows 下报 `Event loop is closed`/会话已关闭警告）。取消后先 `await asyncio.gather(*tasks, return_exceptions=True)` 再关会话，与 ncm/qq 版同口径。
+- **下载前预清理存在同步 IO 漏网**：`delivery.py` 的 `os.path.exists`/`os.remove` 未入线程池，与全局异步卫生标准不一致；已包 `asyncio.to_thread`。
+
 ## v2.0.2 (2026-09-12)
 
 ### 🐛 缺陷修复
