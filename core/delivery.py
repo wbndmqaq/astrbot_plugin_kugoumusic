@@ -20,6 +20,9 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 QQ_FILE_SIZE_LIMIT = 10 * 1024 * 1024
 # aiocqhttp 压缩触发阈值：超过即先 ffmpeg 压成紧凑 mp3 控制载荷（压缩触发语义）
 AIOCQ_COMPRESS_THRESHOLD = 8 * 1024 * 1024
+# aiocqhttp 文件 base64 内联的体积上限：超过且 ffmpeg 不可用（无法压缩）时跳过文件
+# 通道——50MB FLAC → ~67MB base64 一次性进内存/WS，容易把协议端打挂
+AIOCQ_FILE_INLINE_LIMIT = 20 * 1024 * 1024
 # 流式下载块大小
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
 # 流式下载落盘攒批大小（攒满一次写盘，避免小块频繁 IO）
@@ -587,6 +590,25 @@ async def _send_file_payload(
     返回 ``(更新后的 pending_text, 是否真的发出)``。
     """
     display, path, is_compressed = file_payload
+    # ffmpeg 不可用且待发文件超过 base64 内联上限：跳过文件通道并提示用户
+    # （压缩兜底见 _compact_for_aiocq，其依赖 ffmpeg，此处 ffmpeg 缺失时必然未压缩）
+    if is_aiocq and _ffmpeg_path() is None:
+        try:
+            payload_size = os.path.getsize(path)
+        except OSError:
+            payload_size = 0
+        if payload_size > AIOCQ_FILE_INLINE_LIMIT:
+            plugin._log_warn(
+                f"aiocqhttp 文件通道已跳过：{title} - {singer} 约 {payload_size / 1024 / 1024:.1f}MB，"
+                "ffmpeg 不可用无法压缩，base64 内联超过安全阈值"
+            )
+            await plugin._send_chain(
+                event,
+                plugin._plain(
+                    f"⚠ 文件约 {payload_size / 1024 / 1024:.1f}MB 且未安装 ffmpeg，无法压缩发送，已跳过文件发送"
+                ),
+            )
+            return pending_text, False
     try:
         if is_aiocq:
             await _aiocq_send_file(event, pending_text, display, path)

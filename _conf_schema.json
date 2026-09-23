@@ -2,6 +2,7 @@
   "defaultCookie": {
     "type": "string",
     "default": "",
+    "secret": true,
     "description": "酷狗登录 Cookie（token=...;userid=... 等）。可手动粘贴，或由 #kg登录 扫码自动写入，后写覆盖先写。留空则匿名（VIP 歌曲仅 60s 试听）。",
     "hint": "从浏览器已登录的酷狗页面复制：F12 → Network → 任一 kugou.com 请求 → 请求头 Cookie 整段粘贴。注意：此处明文存储，请留意 WebUI 面板访问权限。"
   },

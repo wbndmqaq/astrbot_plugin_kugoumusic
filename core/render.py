@@ -212,7 +212,9 @@ async def _render_once(browser, html: str) -> bytes:
             await page.wait_for_timeout(50)
         except Exception:  # noqa: BLE001
             pass
-        return await page.screenshot(full_page=True, type="png")
+        # 截图偶发卡死（Chromium 假死/崩溃）：15 秒兜底超时，超时按渲染失败处理，
+        # 走 render_card_png 的重建浏览器重试 → 仍失败回退纯文本的既有降级链
+        return await asyncio.wait_for(page.screenshot(full_page=True, type="png"), timeout=15)
     finally:
         with contextlib.suppress(Exception):
             await page.close()

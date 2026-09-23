@@ -49,16 +49,20 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
     if not cfg.get("enable", True) or cfg.get("enableSongRequest") is False:
         return
     m = re.match(
-        r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#?\s*听\s*([1-9][0-9]?)$", event.message_str.strip(), re.IGNORECASE
+        r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#\s*听\s*([1-9][0-9]?)$", event.message_str.strip(), re.IGNORECASE
     )
     n = int(m.group(1) or m.group(2) or 0) if m else 0
     # 裸 #听N（无 kg 前缀）仅由最近活跃的音乐插件响应，避免多插件同装时抢占顺序取决于加载顺序
-    if m and m.group(2) and not await service.is_session_owner():
+    if m and m.group(2) and not await service.is_session_owner(event):
         return
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
     # 会话必须是本插件（kg_songs），否则不抢其它插件的 #听
     if not session or session.get("type") != "kg_songs" or not session.get("data"):
+        # 显式 #kg听N：列表已过期/不存在时明确提示；裸 #听N 保持静默（可能属于其它插件/场景）
+        if m and m.group(1):
+            await service.reply(event, "列表已过期或不存在，请先 #kg点歌")
+            event.stop_event()
         return
     songs = session.get("data") or []
     if n < 1 or n > len(songs):
@@ -67,9 +71,6 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
         return
     song = songs[n - 1]
     action = session.get("action") or "play"
-    # 待办动作一次性消费：先清掉 action，避免下次 #听N 误触发
-    if action != "play":
-        await cardlib.SessionStore.set(service.plugin, scope, {**session, "action": "play"})
     try:
         if action == "lyric":
             await service.show_lyric(event, song)
@@ -85,6 +86,13 @@ async def choose_song(service: MusicService, event: AstrMessageEvent):
             await service.show_versions(event, song)
         else:
             await service.play_song(event, song, source="点歌")
+        # 待办动作一次性消费：执行**成功后**才复位为 play（原先在执行前复位，
+        # 执行抛 ApiError 时待办动作就丢了）。写回失败静默：极端情况下重复执行可接受。
+        if action != "play":
+            try:
+                await cardlib.SessionStore.set(service.plugin, scope, {**session, "action": "play"})
+            except Exception:
+                pass
     except ApiError as err:
         service.log_warn(f"执行失败: {err}")
         await service.reply(event, f"操作失败：{err}")
@@ -103,7 +111,7 @@ async def play_all(service: MusicService, event: AstrMessageEvent):
     ):
         return
     # 裸 #听所有（无 kg 前缀）仅由最近活跃的音乐插件响应
-    if not re.match(r"^#?(?:kg|KG)", event.message_str.strip(), re.IGNORECASE) and not await service.is_session_owner():
+    if not re.match(r"^#?(?:kg|KG)", event.message_str.strip(), re.IGNORECASE) and not await service.is_session_owner(event):
         return
     scope = service.scope(event)
     session = await cardlib.SessionStore.get(service.plugin, scope)
@@ -190,7 +198,7 @@ ROUTES = [
         run=pick_song,
     ),
     Route(
-        pattern=re.compile(r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#?\s*听\s*([1-9][0-9]?)$", re.IGNORECASE),
+        pattern=re.compile(r"^#?(?:kg|KG)\s*听\s*([1-9][0-9]?)$|^#\s*听\s*([1-9][0-9]?)$", re.IGNORECASE),
         name="choose_song",
         doc="#kg听N：播放当前酷狗点歌列表第 N 首；若会话有待办动作（#kg歌词 等先选歌）则先执行该动作",
         run=choose_song,

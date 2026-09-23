@@ -126,7 +126,9 @@ async def quality_cmd(service: MusicService, event: AstrMessageEvent):
 async def api_cmd(service: MusicService, event: AstrMessageEvent):
     """#kg api <地址>：修改 API 地址"""
     m = re.match(r"^#?(?:kg|KG)\s*api\s*(https?://\S+)$", event.message_str.strip(), re.IGNORECASE)
-    url = m.group(1).strip().rstrip("/") if m else ""
+    if not m:
+        return  # 不匹配时直接返回，绝不能把 apiBase 清空
+    url = m.group(1).strip().rstrip("/")
     service.plugin.config["apiBase"] = url
     if not await service.save_config():
         await service.reply(

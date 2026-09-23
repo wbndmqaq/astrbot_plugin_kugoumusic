@@ -44,21 +44,19 @@ GOOD_SONG_CARDS = {"精选": 1, "怀旧": 2, "热门": 3, "小众": 4, "vip": 6,
 ARTIST_LIST_TYPES = {"": 0, "全部": 0, "华语": 1, "欧美": 2, "日韩": 3, "其他": 4, "日本": 5, "韩国": 6}
 
 
-def _owner_marker_path() -> Path:
-    """三个音乐插件（网易云/酷狗/QQ）共用的「最近活跃归属」标记文件路径。
-
-    用于裸 #听N 的跨插件抢占：点歌出列表时写入本插件名，裸 #听N 仅由最近
-    活跃的插件响应，避免多插件同装时抢占顺序取决于插件加载顺序。
-    """
+def _owner_marker_path() -> "Path | None":
+    """裸 #听N 跨插件仲裁标记（三音乐插件共用）。固定在 data/plugin_data/ 下；
+    取不到路径时返回 None（仲裁退化为「无主」，绝不写插件自身目录）。"""
     try:
-        from astrbot.api.star import StarTools
+        from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-        # 必须显式传插件名：StarTools 只在调用栈位于插件主模块（main.py）时才能
-        # 反查插件元数据，本函数在 core/service.py 里，不传名会抛 RuntimeError。
-        data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-        return data_dir.parent / "_music_session_owner.json"
+        return Path(get_astrbot_data_path()) / "plugin_data" / "_music_session_owner.json"
     except Exception:
-        return Path(__file__).resolve().parent.parent / "_music_session_owner.json"
+        return None
+
+
+# 仲裁标记写盘失败的一次性告警标志（只告警一次，避免每次点歌都刷日志）
+_owner_mark_warned = False
 
 
 def is_plugin_command_msg(msg: str) -> bool:
@@ -130,38 +128,74 @@ class MusicService:
 
     # ──────────── 裸 #听N 跨插件抢占 ────────────
 
-    async def mark_session_owner(self) -> None:
-        """点歌出列表后，把本插件记录为「最近活跃的音乐插件」。"""
-        name = str(getattr(self.plugin, "name", "") or "")
+    async def mark_session_owner(self, scope: str) -> None:
+        """点歌出列表后，把本插件记录为该 scope（群/私聊）内「最近活跃的音乐插件」。"""
+        name = str(getattr(self.plugin, "name", "") or PLUGIN_NAME)
 
         def _w():
+            global _owner_mark_warned
             try:
                 p = _owner_marker_path()
+                if p is None:
+                    return
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+                scopes = data.get("scopes") if isinstance(data, dict) else None
+                scopes = dict(scopes) if isinstance(scopes, dict) else {}
+                scopes[scope] = {"plugin": name, "ts": int(time.time())}
+                # 容量上限：只保留最近活跃的 256 个 scope，防止文件无限膨胀
+                if len(scopes) > 256:
+                    keep = sorted(
+                        scopes.items(), key=lambda kv: kv[1].get("ts") or 0, reverse=True
+                    )[:256]
+                    scopes = dict(keep)
                 p.parent.mkdir(parents=True, exist_ok=True)
-                tmp = p.with_name(p.name + ".tmp")
+                # 临时文件名带插件专属后缀：三个音乐插件并发写同一目标时互不覆盖
+                tmp = p.with_name(f"{p.stem}.{PLUGIN_NAME}.tmp")
                 tmp.write_text(
-                    json.dumps({"plugin": name, "ts": int(time.time())}, ensure_ascii=False),
+                    json.dumps({"version": 2, "scopes": scopes}, ensure_ascii=False),
                     encoding="utf-8",
                 )
                 os.replace(tmp, p)  # 原子替换，避免并发写坏
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                if not _owner_mark_warned:
+                    _owner_mark_warned = True
+                    self.log_warn(f"仲裁标记写入失败（后续不再重复告警）: {e}")
 
         await asyncio.to_thread(_w)
 
-    async def is_session_owner(self) -> bool:
-        """本插件是否为最近活跃的音乐插件（无标记时视为 True，退化为「谁有会话谁响应」）。"""
-        name = str(getattr(self.plugin, "name", "") or "")
+    async def is_session_owner(self, event: AstrMessageEvent) -> bool:
+        """本插件是否为该 scope 内最近活跃的音乐插件。
+
+        语义：路径取不到 → False（仲裁不可用，宁可静默）；文件不存在 / JSON 损坏 /
+        旧格式（无 scopes）/ 本 scope 无记录 → True（无主，谁有会话谁响应）；有记录
+        → 仅当记录的插件是本插件；读取抛异常 → False（宁可偶尔静默，不能双重响应）。
+        """
+        scope = self.scope(event)
+        name = str(getattr(self.plugin, "name", "") or PLUGIN_NAME)
 
         def _r() -> bool:
             try:
                 p = _owner_marker_path()
+                if p is None:
+                    return False
                 if not p.exists():
                     return True
-                data = json.loads(p.read_text(encoding="utf-8"))
-                return data.get("plugin") == name
-            except Exception:
-                return True
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    return True  # JSON 损坏：与旧格式同口径，视为无主
+                if not isinstance(data, dict) or not isinstance(data.get("scopes"), dict):
+                    return True  # 旧格式（无 scopes）或空数据：视为无主
+                entry = data["scopes"].get(scope)
+                if not isinstance(entry, dict):
+                    return True  # 本 scope 无记录：本群无主
+                return entry.get("plugin") == name
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[kugou] 仲裁标记读取异常，按未归属处理: {e}")
+                return False
 
         return await asyncio.to_thread(_r)
 
@@ -347,10 +381,15 @@ class MusicService:
             self.log_warn(f"_reply 发送失败: {e}\n{_tb.format_exc()}")
 
     def scope(self, event: AstrMessageEvent) -> str:
+        """会话作用域：群聊用群号、私聊用发送者 ID，并带平台前缀防多平台 ID 撞车。
+
+        注：前缀同时改变 KV 会话键与仲裁 scope——升级后旧的（10 分钟 TTL 内）会话
+        一次性失效，需重新点歌，影响可接受。
+        """
         gid = getattr(event.message_obj, "group_id", None)
         if gid:
-            return str(gid)
-        return event.get_sender_id()
+            return f"{event.get_platform_name()}:{gid}"
+        return f"{event.get_platform_name()}:{event.get_sender_id()}"
 
     def user_key(self, event: AstrMessageEvent) -> str:
         return str(event.get_sender_id() or "")
@@ -469,7 +508,7 @@ class MusicService:
         base = dict(session) if session else {}
         base.update({"type": "kg_songs", "keyword": keyword, "data": lst, "action": action})
         await cardlib.SessionStore.set(self.plugin, scope, base)
-        await self.mark_session_owner()
+        await self.mark_session_owner(scope)
         tip = f"回复 #kg听N 即可{verb}"
         text = cardlib.format_song_list(lst, keyword, tip=tip)
         if self.cfg().get("renderListCard", True):
@@ -631,7 +670,7 @@ class MusicService:
     async def list_to_session(self, event: AstrMessageEvent, keyword: str, songs: list, *, tip: str = "") -> bool:
         scope = self.scope(event)
         await cardlib.SessionStore.set(self.plugin, scope, {"type": "kg_songs", "keyword": keyword, "data": songs})
-        await self.mark_session_owner()
+        await self.mark_session_owner(scope)
         text = cardlib.format_song_list(songs, keyword, tip=tip)
         if self.cfg().get("renderListCard", True):
             data = cardlib.build_list_card_data(keyword, songs, options={"tip": tip}, cfg=self.cfg())

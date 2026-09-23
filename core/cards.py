@@ -5,10 +5,23 @@ import re
 import time
 from urllib.parse import urlparse
 
+from astrbot.api import logger
+
 from .api import cfg_int
 from .help_data import HELP_SECTIONS
 from .messages import LYRICS_SOURCE, TIP_HELP, TIP_PLAYLIST_VIEW
 from .quality import QUALITY_LABEL
+
+# KV 存储异常只告警一次（吞异常不抛出的行为不变，但至少留一条可查的日志）
+_kv_warned = False
+
+
+def _warn_kv_broken(err: Exception) -> None:
+    global _kv_warned
+    if _kv_warned:
+        return
+    _kv_warned = True
+    logger.warning(f"[kugoumusic] 插件 KV 存储异常，点歌会话可能不可用: {err}")
 
 # ──────────── 会话存储 ────────────
 
@@ -66,8 +79,8 @@ class SessionStore:
                     cls._evict_if_needed()
                     return raw
                 await plugin.delete_kv_data(k)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            _warn_kv_broken(e)
         return None
 
     @classmethod
@@ -86,8 +99,8 @@ class SessionStore:
         # 列表的覆盖语义，保持现状。
         try:
             await plugin.put_kv_data(cls._key(scope, kind), json.dumps(data, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            _warn_kv_broken(e)
         return data
 
 
