@@ -4,6 +4,11 @@
 
 <h1 align="center">astrbot_plugin_kugoumusic</h1>
 
+> [!WARNING]
+> **⛔ 本插件已停止维护，不再接受任何功能更新与 Bug 修复。**
+> 网易云、QQ、酷狗等音乐点歌功能已整合进新的聚合插件，请前往新项目安装使用：
+> 👉 **[astrbot_plugin_music_hub](https://github.com/wbndmqaq/astrbot_plugin_music_hub)**
+
 # 🎵 酷狗音乐点歌/解析插件（AstrBot）
 
 > 基于 [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi) 的 AstrBot 酷狗音乐插件。
@@ -17,7 +22,7 @@
 - **点歌播放**：关键词搜索 → 列表卡片 → `#kg听N` 选歌，或 `#kg播放` 直接播第一首
 - **音质自适配**：`auto` 自动匹配歌曲最高可用音质并逐级降级；蝰蛇母带2.0 / 蝰蛇超清 / 蝰蛇HiFi / Hi-Res / 无损 / 320K / 128K 共 7 档；未登录 VIP 歌曲自动 60s 试听降级
 - **音频投递**：语音（OneBot 协议端转 silk）+ 群/好友文件双通道，互不阻塞，失败自动回退
-- **多平台适配**：QQ 官方（合并消息规避额度、大文件分片上传、ffmpeg 压缩兜底、纯文本兜底）、个人微信 weixin_oc（语音自动降级为文件）、Telegram / 钉钉 / 飞书 / KOOK / Discord 原生支持语音与文件
+- **多平台适配**：QQ 官方（合并消息规避额度、大文件分片上传、ffmpeg 压缩兜底、纯文本兜底）、个人微信 weixin_oc（语音自动降级为文件）、Telegram / KOOK / Discord 原生支持语音与文件；钉钉 / 飞书按平台能力受限（不支持 Record/Video/File 组件），语音/文件自动降级为文本提示
 - **卡片渲染**：10 套酷狗蓝主题 HTML 卡片（列表/详情/歌词/热搜/评论/榜单/歌单/帮助/状态/设置），自动裁剪白边
 - **链接自动解析**：发送 `kugou.com/song/#hash=...` 分享链接，自动识别歌曲并播放
 - **扫码登录**：`#kg登录` 生成二维码，轮询自动写入 Cookie，全群共享账号
@@ -31,7 +36,7 @@
 
 | 依赖 | 说明 |
 | --- | --- |
-| **AstrBot** | `>=4.16, <5`（推荐 4.26+） |
+| **AstrBot** | `>=4.27.3, <5` |
 | **API 服务** | [KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（默认 `http://127.0.0.1:4000`） |
 | **node** | api运行时环境（建议V22的LTS版本以上） |
 | **pnpm** | api依赖更新使用 |
@@ -276,7 +281,7 @@ QQ 官方机器人接口与 OneBot 差异较大，插件做了专项适配：
 
 ### Telegram / 钉钉 / 飞书 / KOOK / Discord
 
-五个平台适配器出站均**原生支持语音与文件**，插件双通道投递无需调整：
+Telegram / KOOK / Discord 出站原生支持语音与文件，插件双通道投递无需调整；钉钉 / 飞书平台适配器不支持 Record/Video/File 消息组件，语音/文件通道会自动降级为文本提示：
 
 - **Telegram**：`send_voice`，用户隐私设置拒绝语音时适配器自动回退发文档
 - **钉钉**：`_prepare_voice_for_dingtalk` 自动转码语音格式
@@ -374,6 +379,6 @@ QQ 群（申请frp的api和插件讨论）：[点击加入](https://qm.qq.com/q/
 
 <div align="center">
 
-如果觉得这个插件对你有帮助，欢迎 Star 一下哈哈
+本插件已停止维护。如果觉得新的聚合插件对你有帮助，欢迎给 [astrbot_plugin_music_hub](https://github.com/wbndmqaq/astrbot_plugin_music_hub) 点个 Star
 
 </div>
